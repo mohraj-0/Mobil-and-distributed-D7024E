@@ -9,11 +9,12 @@ version: "3"
 services:
   kademliaNodes:
     image: kadlab:latest # Make sure your Docker image has this name.
+    command: sh -c "while true; do sleep 3600; done" 
     stdin_open: true
     tty: true
     deploy:
       mode: replicated
-      replicas: 5  
+      replicas: 50 
 #        resources:
 #           limits:
 #              cpus: "0.1"
