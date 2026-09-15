@@ -19,7 +19,7 @@ type Message struct {
 	Payload []byte
 }
 
-// SimulatedNetworkAPI is the general network contract for in-memory tests.
+// General network contract.
 type SimulatedNetworkAPI interface {
 	Listen(addr Address) (Connection, error)
 	Dial(addr Address) (Connection, error)
