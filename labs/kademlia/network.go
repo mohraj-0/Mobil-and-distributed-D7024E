@@ -1,45 +1,37 @@
 package kademlia
 
 import (
+	"errors"
 	"fmt"
 	"net"
 )
 
+const defaultNetworkAddress = "127.0.0.1:8000"
+
 type Network struct {
+	Address string
 }
 
-// Listen gör att noden börja lyssna på UDP medelande
+// Listen starts a UDP listener and prints every received message.
 func Listen(ip string, port int) {
-	// sätter ihop ip och port till en address
 	address := fmt.Sprintf("%s:%d", ip, port)
 
-	// gör om address till en UDP address som go kan använda
 	udpAddr, err := net.ResolveUDPAddr("udp", address)
-	// om addressen inte kan skapas, skriv ut fel
 	if err != nil {
 		fmt.Println("Error resolving UDP address:", err)
 		return
 	}
-	// Öppnar UDP-porten och börjar lyssna på adressen
+
 	conn, err := net.ListenUDP("udp", udpAddr)
-	// Om UDP-porten inte kan öppnas, skriv ut fel
 	if err != nil {
 		fmt.Println("Error listening on UDP:", err)
 		return
 	}
-	// Stänger UDP-anslutningen när funktionen avslutas
 	defer conn.Close()
 
-	// Visar att noden har börjat lyssna
 	fmt.Println("Listening on", address)
 
-	// (ta emot ett UDP-meddelande)
-
-	// Skapar plats för inkommande data
 	buffer := make([]byte, 1024)
-
-	// Väntar på ett UDP-meddelande
-	// Loop hela tiden så att noden kan ta emot flera meddelanden
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -47,161 +39,83 @@ func Listen(ip string, port int) {
 			continue
 		}
 
-		// Gör om mottagen data från bytes till text
-		message := string(buffer[:n])
-
-		// Skriver ut avsändaren
 		fmt.Println("Message from:", remoteAddr)
-
-		// Skriver ut meddelandet
-		fmt.Println("Message:", message)
+		fmt.Println("Message:", string(buffer[:n]))
 	}
 }
 
-// skicka ett UDP-meddelande, från en node till annan nod
-func (network *Network) SendPingMessage(contact *Contact) {
-
-	// Gör om  adress till en UDP-adress
-
-	udpAddr, err := net.ResolveUDPAddr("udp", contact.Address)
-
-	// Om adressen inte går att använda
-	if err != nil {
-		fmt.Println("Error resolving contact address:", err)
-		return
+func (network *Network) SendPingMessage(contact *Contact) error {
+	if contact == nil {
+		return errors.New("contact is nil")
 	}
 
-	// Skapar en UDP-anslutning till den andra noden
-	conn, err := net.DialUDP("udp", nil, udpAddr)
-
-	// Om anslutningen inte kan skapas, skriv ut fel
-	if err != nil {
-		fmt.Println("Error connecting to UDP node:", err)
-		return
-	}
-
-	// Stänger UDP-anslutningen när funktionen är klar
-	defer conn.Close()
-
-	// Själva meddelandet som vi vill skicka
-	message := []byte("PING")
-
-	// Skickar PING-meddelandet till den andra noden
-	_, err = conn.Write(message)
-
-	// Om meddelandet inte kunde skickas, error
-	if err != nil {
+	if err := network.sendUDPMessage(contact.Address, []byte("PING")); err != nil {
 		fmt.Println("Error sending PING:", err)
-		return
+		return err
 	}
 
-	// Visar att PING skickades
 	fmt.Println("PING sent to", contact.Address)
-
+	return nil
 }
 
-// Skickar en fråga till en annan nod för att hitta nära noder(med target ID)
-func (network *Network) SendFindContactMessage(contact *Contact) {
-
-	// Gör om  adress till en UDP-adress
-	udpAddr, err := net.ResolveUDPAddr("udp", contact.Address)
-	if err != nil {
-		fmt.Println("Error resolving contact address:", err)
-		return
+func (network *Network) SendFindContactMessage(contact *Contact) error {
+	if contact == nil {
+		return errors.New("contact is nil")
 	}
 
-	// Skapar en UDP-anslutning till den andra noden
-	conn, err := net.DialUDP("udp", nil, udpAddr)
-	if err != nil {
-		fmt.Println("Error connecting to UDP node:", err)
-		return
-	}
-
-	// Stänger anslutningen när funktionen är klar
-	defer conn.Close()
-
-	// Skapar ett enkelt meddelande
-	message := []byte("FIND_CONTACT")
-
-	// Skickar meddelandet till den andra noden
-	_, err = conn.Write(message)
-
-	// Om något går fel
-	if err != nil {
+	if err := network.sendUDPMessage(contact.Address, []byte("FIND_CONTACT")); err != nil {
 		fmt.Println("Error sending FIND_CONTACT:", err)
-		return
+		return err
 	}
-	// Visar att meddelandet skickades
+
 	fmt.Println("FIND_CONTACT sent to", contact.Address)
+	return nil
 }
 
-// Skickar en fråga till en annan nod för att hitta data med en viss hash
-func (network *Network) SendFindDataMessage(hash string) {
-
-	// Här använder vi en exempeladress tills vi senare kopplar funktionen
-	// till en riktig Contact eller routing table.
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8000")
-	if err != nil {
-		fmt.Println("Error resolving UDP address:", err)
-		return
-	}
-
-	// Skapar en UDP-anslutning
-	conn, err := net.DialUDP("udp", nil, udpAddr)
-	if err != nil {
-		fmt.Println("Error connecting to UDP node:", err)
-		return
-	}
-
-	// Stänger anslutningen när funktionen är klar
-	defer conn.Close()
-
-	// Skapar meddelandet och lägger med hashen
+func (network *Network) SendFindDataMessage(hash string) error {
 	message := []byte("FIND_DATA " + hash)
-
-	// Skickar meddelandet
-	_, err = conn.Write(message)
-	if err != nil {
+	if err := network.sendUDPMessage(network.destinationAddress(), message); err != nil {
 		fmt.Println("Error sending FIND_DATA:", err)
-		return
+		return err
 	}
 
-	// Visar att meddelandet skickades
 	fmt.Println("FIND_DATA sent for hash:", hash)
-
+	return nil
 }
 
-// Skickar data till en annan nod för lagring
-func (network *Network) SendStoreMessage(data []byte) {
-
-	// Tillfällig adress tills vi senare kopplar funktionen
-	// till en riktig Contact eller routing table.
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8000")
-	if err != nil {
-		fmt.Println("Error resolving UDP address:", err)
-		return
+func (network *Network) SendStoreMessage(data []byte) error {
+	message := append([]byte("STORE "), data...)
+	if err := network.sendUDPMessage(network.destinationAddress(), message); err != nil {
+		fmt.Println("Error sending STORE:", err)
+		return err
 	}
 
-	// Skapar en UDP-anslutning
+	fmt.Println("STORE message sent")
+	return nil
+}
+
+func (network *Network) destinationAddress() string {
+	if network.Address != "" {
+		return network.Address
+	}
+	return defaultNetworkAddress
+}
+
+func (network *Network) sendUDPMessage(address string, message []byte) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address %q: %w", address, err)
+	}
+
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		fmt.Println("Error connecting to UDP node:", err)
-		return
+		return fmt.Errorf("connect to UDP address %q: %w", address, err)
 	}
-
-	// Stänger anslutningen när funktionen är klar
 	defer conn.Close()
 
-	// Lägger till "STORE " före själva datan
-	message := append([]byte("STORE "), data...)
-
-	// Skickar meddelandet
-	_, err = conn.Write(message)
-	if err != nil {
-		fmt.Println("Error sending STORE:", err)
-		return
+	if _, err := conn.Write(message); err != nil {
+		return fmt.Errorf("write UDP message to %q: %w", address, err)
 	}
 
-	// Visar att datan skickades
-	fmt.Println("STORE message sent")
+	return nil
 }
