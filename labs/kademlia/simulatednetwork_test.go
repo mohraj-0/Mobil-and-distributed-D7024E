@@ -1,4 +1,4 @@
-package kademlia
+package kademlia_test
 
 import (
 	"fmt"
@@ -6,12 +6,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"d7024e/kademlia"
 )
 
 func TestSimulatedNetworkSendReceive(t *testing.T) {
-	network := NewSimulatedNetwork()
-	senderAddr := Address{IP: "127.0.0.1", Port: 8000}
-	receiverAddr := Address{IP: "127.0.0.1", Port: 8001}
+	t.Log("testing that a simulated connection can send one message to a listening address")
+
+	network := kademlia.NewSimulatedNetwork()
+	senderAddr := kademlia.Address{IP: "127.0.0.1", Port: 8000}
+	receiverAddr := kademlia.Address{IP: "127.0.0.1", Port: 8001}
 
 	receiver, err := network.Listen(receiverAddr)
 	if err != nil {
@@ -25,7 +29,7 @@ func TestSimulatedNetworkSendReceive(t *testing.T) {
 	}
 	defer sender.Close()
 
-	want := Message{
+	want := kademlia.Message{
 		From:    senderAddr,
 		To:      receiverAddr,
 		Payload: []byte("ping"),
@@ -33,6 +37,7 @@ func TestSimulatedNetworkSendReceive(t *testing.T) {
 	if err := sender.Send(want); err != nil {
 		t.Fatalf("send message: %v", err)
 	}
+	t.Logf("example sent: from=%v to=%v payload=%q", want.From, want.To, string(want.Payload))
 
 	got, err := receiver.Recv()
 	if err != nil {
@@ -42,11 +47,14 @@ func TestSimulatedNetworkSendReceive(t *testing.T) {
 	if got.From != want.From || got.To != want.To || string(got.Payload) != string(want.Payload) {
 		t.Fatalf("unexpected message: got %+v, want %+v", got, want)
 	}
+	t.Logf("example received: from=%v to=%v payload=%q", got.From, got.To, string(got.Payload))
 }
 
 func TestSimulatedNetworkErrors(t *testing.T) {
-	network := NewSimulatedNetwork()
-	addr := Address{IP: "127.0.0.1", Port: 8100}
+	t.Log("testing duplicate listens, dialing missing/closed addresses, and receiving after close")
+
+	network := kademlia.NewSimulatedNetwork()
+	addr := kademlia.Address{IP: "127.0.0.1", Port: 8100}
 
 	listener, err := network.Listen(addr)
 	if err != nil {
@@ -55,10 +63,15 @@ func TestSimulatedNetworkErrors(t *testing.T) {
 
 	if _, err := network.Listen(addr); err == nil {
 		t.Fatal("expected duplicate listen to fail")
+	} else {
+		t.Logf("example rejected duplicate listen on %v: %v", addr, err)
 	}
 
-	if _, err := network.Dial(Address{IP: "127.0.0.1", Port: 9999}); err == nil {
+	missingAddr := kademlia.Address{IP: "127.0.0.1", Port: 9999}
+	if _, err := network.Dial(missingAddr); err == nil {
 		t.Fatal("expected dialing a missing address to fail")
+	} else {
+		t.Logf("example rejected dial to missing address %v: %v", missingAddr, err)
 	}
 
 	if err := listener.Close(); err != nil {
@@ -70,24 +83,30 @@ func TestSimulatedNetworkErrors(t *testing.T) {
 
 	if _, err := network.Dial(addr); err == nil {
 		t.Fatal("expected dialing a closed listener to fail")
+	} else {
+		t.Logf("example rejected dial to closed address %v: %v", addr, err)
 	}
 	if _, err := listener.Recv(); err == nil {
 		t.Fatal("expected receiving on a closed listener to fail")
+	} else {
+		t.Logf("example rejected receive after close: %v", err)
 	}
 }
 
 func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 	const nodeCount = 1000
 
-	network := NewSimulatedNetwork()
-	addresses := make([]Address, nodeCount)
-	listeners := make([]Connection, nodeCount)
-	contacts := make([]Contact, nodeCount)
-	listenersByAddress := make(map[Address]Connection, nodeCount)
+	t.Logf("testing simulated network delivery and Kademlia lookup with %d nodes", nodeCount)
+
+	network := kademlia.NewSimulatedNetwork()
+	addresses := make([]kademlia.Address, nodeCount)
+	listeners := make([]kademlia.Connection, nodeCount)
+	contacts := make([]kademlia.Contact, nodeCount)
+	listenersByAddress := make(map[kademlia.Address]kademlia.Connection, nodeCount)
 
 	for i := 0; i < nodeCount; i++ {
-		addresses[i] = Address{IP: "10.0.0.1", Port: 10000 + i}
-		contacts[i] = NewContact(testKademliaID(i), fmt.Sprintf("%s:%d", addresses[i].IP, addresses[i].Port))
+		addresses[i] = kademlia.Address{IP: "10.0.0.1", Port: 10000 + i}
+		contacts[i] = kademlia.NewContact(testKademliaID(i), fmt.Sprintf("%s:%d", addresses[i].IP, addresses[i].Port))
 
 		listener, err := network.Listen(addresses[i])
 		if err != nil {
@@ -97,26 +116,29 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 		listenersByAddress[addresses[i]] = listener
 		defer listener.Close()
 	}
+	t.Logf("registered %d simulated listeners", nodeCount)
 
-	me := NewContact(&KademliaID{}, "10.0.0.1:11000")
-	kademlia := &Kademlia{RoutingTable: NewRoutingTable(me)}
+	me := kademlia.NewContact(&kademlia.KademliaID{}, "10.0.0.1:11000")
+	node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(me)}
 	for _, contact := range contacts {
-		kademlia.RoutingTable.AddContact(contact)
+		node.RoutingTable.AddContact(contact)
 	}
+	t.Logf("added %d contacts to the routing table", nodeCount)
 
 	target := contacts[777]
-	closest := kademlia.LookupContact(&target)
+	closest := node.LookupContact(&target)
 	if len(closest) != 10 {
 		t.Fatalf("lookup returned %d contacts, want 10", len(closest))
 	}
 	if !closest[0].ID.Equals(target.ID) {
 		t.Fatalf("closest contact = %s, want target %s", closest[0].ID, target.ID)
 	}
+	t.Log("lookup returned 10 contacts and the target contact was closest")
 
-	senderAddr := Address{IP: "10.0.0.1", Port: 12000}
+	senderAddr := kademlia.Address{IP: "10.0.0.1", Port: 12000}
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(closest))
-	expectedPayloads := make(map[Address]string, len(closest))
+	expectedPayloads := make(map[kademlia.Address]string, len(closest))
 
 	for i, contact := range closest {
 		to, err := addressFromContact(contact)
@@ -125,6 +147,9 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 		}
 		payload := []byte(fmt.Sprintf("message-%d", i))
 		expectedPayloads[to] = string(payload)
+		if i < 3 {
+			t.Logf("example sent to closest contact %d: from=%v to=%v payload=%q", i, senderAddr, to, string(payload))
+		}
 
 		wg.Add(1)
 		go func() {
@@ -137,7 +162,7 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 			}
 			defer conn.Close()
 
-			if err := conn.Send(Message{From: senderAddr, To: to, Payload: payload}); err != nil {
+			if err := conn.Send(kademlia.Message{From: senderAddr, To: to, Payload: payload}); err != nil {
 				errCh <- fmt.Errorf("send %v -> %v: %w", senderAddr, to, err)
 			}
 		}()
@@ -152,6 +177,7 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 		}
 	}
 
+	receivedExamples := 0
 	for addr, expectedPayload := range expectedPayloads {
 		listener := listenersByAddress[addr]
 
@@ -164,11 +190,16 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 			t.Fatalf("node %v got %+v, want from=%+v to=%+v payload=%q",
 				addr, got, senderAddr, addr, expectedPayload)
 		}
+		if receivedExamples < 3 {
+			t.Logf("example received by closest contact: from=%v to=%v payload=%q", got.From, got.To, string(got.Payload))
+			receivedExamples++
+		}
 	}
+	t.Log("verified every closest contact received its expected message")
 }
 
-func testKademliaID(index int) *KademliaID {
-	id := &KademliaID{}
+func testKademliaID(index int) *kademlia.KademliaID {
+	id := &kademlia.KademliaID{}
 
 	bucketIndex := index % 100
 	byteIndex := bucketIndex / 8
@@ -183,18 +214,18 @@ func testKademliaID(index int) *KademliaID {
 	return id
 }
 
-func addressFromContact(contact Contact) (Address, error) {
+func addressFromContact(contact kademlia.Contact) (kademlia.Address, error) {
 	colonIndex := strings.LastIndex(contact.Address, ":")
 	if colonIndex == -1 {
-		return Address{}, fmt.Errorf("missing port separator")
+		return kademlia.Address{}, fmt.Errorf("missing port separator")
 	}
 
 	port, err := strconv.Atoi(contact.Address[colonIndex+1:])
 	if err != nil {
-		return Address{}, err
+		return kademlia.Address{}, err
 	}
 
-	return Address{
+	return kademlia.Address{
 		IP:   contact.Address[:colonIndex],
 		Port: port,
 	}, nil
