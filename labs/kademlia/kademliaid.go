@@ -5,13 +5,16 @@ import (
 	"math/rand"
 )
 
-// the static number of bytes in a KademliaID
+// IDLength är antal bytes i ett Kademlia-ID: 32 bytes = 256 bitar.
 const IDLength = 32 // 256 bit / 8 bits/byte = 32 bytes
 
-// KademliaID is a 256-bit node or key identifier.
+// KademliaID är ett 256-bitars ID för både noder och data-keys.
+// Samma typ används för node lookup och data lookup eftersom Kademlia placerar
+// allt i samma ID-rymd.
 type KademliaID [IDLength]byte
 
-// NewKademliaID returns a new instance of a KademliaID based on the string input
+// NewKademliaID skapar ett ID från en hex-sträng.
+// Strängen måste representera 32 bytes, alltså 64 hex-tecken.
 func NewKademliaID(data string) *KademliaID {
 	decoded, _ := hex.DecodeString(data)
 
@@ -23,8 +26,8 @@ func NewKademliaID(data string) *KademliaID {
 	return &newKademliaID
 }
 
-// NewRandomKademliaID returns a new instance of a random KademliaID,
-// change this to a better version if you like
+// NewRandomKademliaID skapar ett slumpmässigt node-ID.
+// Den här enkla varianten använder math/rand och är främst för labb/test.
 func NewRandomKademliaID() *KademliaID {
 	newKademliaID := KademliaID{}
 	for i := 0; i < IDLength; i++ {
@@ -33,7 +36,8 @@ func NewRandomKademliaID() *KademliaID {
 	return &newKademliaID
 }
 
-// Less returns true if kademliaID < otherKademliaID (bitwise)
+// Less jämför två ID:n byte för byte som stora heltal.
+// Det används när XOR-avstånd ska sorteras från närmast till längst bort.
 func (kademliaID KademliaID) Less(otherKademliaID *KademliaID) bool {
 	for i := 0; i < IDLength; i++ {
 		if kademliaID[i] != otherKademliaID[i] {
@@ -43,7 +47,7 @@ func (kademliaID KademliaID) Less(otherKademliaID *KademliaID) bool {
 	return false
 }
 
-// Equals returns true if kademliaID == otherKademliaID (bitwise)
+// Equals kontrollerar om två ID:n är exakt lika.
 func (kademliaID KademliaID) Equals(otherKademliaID *KademliaID) bool {
 	for i := 0; i < IDLength; i++ {
 		if kademliaID[i] != otherKademliaID[i] {
@@ -53,8 +57,8 @@ func (kademliaID KademliaID) Equals(otherKademliaID *KademliaID) bool {
 	return true
 }
 
-// CalcDistance returns a new instance of a KademliaID that is built
-// through a bitwise XOR operation betweeen kademliaID and target
+// CalcDistance räknar ut Kademlia-avståndet mellan två ID:n med XOR.
+// Ju mindre XOR-resultat, desto närmare ligger noderna/keys i ID-rymden.
 func (kademliaID KademliaID) CalcDistance(target *KademliaID) *KademliaID {
 	result := KademliaID{}
 	for i := 0; i < IDLength; i++ {
@@ -63,7 +67,7 @@ func (kademliaID KademliaID) CalcDistance(target *KademliaID) *KademliaID {
 	return &result
 }
 
-// String returns a simple string representation of a KademliaID
+// String gör ID:t till hex så att det kan loggas och jämföras som text.
 func (kademliaID *KademliaID) String() string {
 	return hex.EncodeToString(kademliaID[0:IDLength])
 }

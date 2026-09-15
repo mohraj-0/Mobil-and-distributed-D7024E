@@ -6,39 +6,46 @@ import (
 	"sync"
 )
 
-// Address identifies a node in the simulated network.
+// Address identifierar en nod i det simulerade nätverket.
+// Den ersätter en riktig UDP-adress när tester kör helt i minnet.
 type Address struct {
 	IP   string
 	Port int
 }
 
-// Message is sent between simulated nodes.
+// Message är ett meddelande mellan två simulerade noder.
+// From och To beskriver rutten, Payload är själva datan.
 type Message struct {
 	From    Address
 	To      Address
 	Payload []byte
 }
 
-// SimulatedNetworkAPI defines the network operations used by simulated nodes.
+// SimulatedNetworkAPI beskriver de nätverksoperationer som en nod behöver:
+// lyssna på en adress och skapa en anslutning till en annan adress.
 type SimulatedNetworkAPI interface {
 	Listen(addr Address) (Connection, error)
 	Dial(addr Address) (Connection, error)
 }
 
-// Connection defines the send, receive, and close operations for a simulated link.
+// Connection beskriver en simulerad länk.
+// Samma interface används både för mottagare och sändare i testerna.
 type Connection interface {
 	Send(msg Message) error
 	Recv() (Message, error)
 	Close() error
 }
 
-// SimulatedNetwork routes messages between in-memory simulated addresses.
+// SimulatedNetwork routar meddelanden mellan adresser med Go-kanaler.
+// listeners mappar varje Address till nodens mottagarkanal.
 type SimulatedNetwork struct {
 	mu        sync.RWMutex
 	listeners map[Address]chan Message
 }
 
-// SimulatedConnection sends to or receives from the simulated network.
+// SimulatedConnection är en anslutning mot SimulatedNetwork.
+// Om recvCh är satt kan anslutningen ta emot meddelanden; annars används den
+// bara för att skicka.
 type SimulatedConnection struct {
 	addr    Address
 	network *SimulatedNetwork
@@ -49,14 +56,15 @@ type SimulatedConnection struct {
 
 const simulatedNetworkBufferSize = 1024
 
-// Creates an empty simulated network.
+// NewSimulatedNetwork skapar ett tomt simulerat nätverk.
 func NewSimulatedNetwork() *SimulatedNetwork {
 	return &SimulatedNetwork{
 		listeners: make(map[Address]chan Message),
 	}
 }
 
-// Registers a node so it can receive messages.
+// Listen registrerar en adress så att noden kan ta emot meddelanden.
+// Den returnerade Connection har en recvCh och fungerar som nodens inbox.
 func (n *SimulatedNetwork) Listen(addr Address) (Connection, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -66,6 +74,8 @@ func (n *SimulatedNetwork) Listen(addr Address) (Connection, error) {
 	}
 
 	recvCh := make(chan Message, simulatedNetworkBufferSize)
+
+	// Adressen blir söknyckeln som Send använder för att hitta rätt inbox.
 	n.listeners[addr] = recvCh
 
 	return &SimulatedConnection{
@@ -75,7 +85,8 @@ func (n *SimulatedNetwork) Listen(addr Address) (Connection, error) {
 	}, nil
 }
 
-// Creates a connection to another registered node.
+// Dial skapar en sändaranslutning till en registrerad adress.
+// Den öppnar ingen riktig socket; den kontrollerar bara att mottagaren finns.
 func (n *SimulatedNetwork) Dial(addr Address) (Connection, error) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -90,7 +101,8 @@ func (n *SimulatedNetwork) Dial(addr Address) (Connection, error) {
 	}, nil
 }
 
-// Sends a message to another node.
+// Send lägger meddelandet i mottagarens kanal.
+// Det simulerar nätverksleverans utan UDP, vilket gör lookup-tester snabbare.
 func (c *SimulatedConnection) Send(msg Message) error {
 	c.mu.RLock()
 	if c.closed {
@@ -107,6 +119,8 @@ func (c *SimulatedConnection) Send(msg Message) error {
 		return fmt.Errorf("destination address not found: %+v", msg.To)
 	}
 
+	// Icke-blockerande send: om inboxen är full returnerar vi fel istället för
+	// att testet hänger.
 	select {
 	case recvCh <- msg:
 		return nil
@@ -115,7 +129,8 @@ func (c *SimulatedConnection) Send(msg Message) error {
 	}
 }
 
-// Waits for and receives a message.
+// Recv väntar på nästa meddelande i anslutningens inbox.
+// Bara connections skapade via Listen har en recvCh.
 func (c *SimulatedConnection) Recv() (Message, error) {
 	c.mu.RLock()
 	if c.closed || c.recvCh == nil {
@@ -133,7 +148,8 @@ func (c *SimulatedConnection) Recv() (Message, error) {
 	return msg, nil
 }
 
-// Closes this simulated connection.
+// Close stänger anslutningen.
+// För lyssnare tas adressen bort från nätverket och inbox-kanalen stängs.
 func (c *SimulatedConnection) Close() error {
 	c.mu.Lock()
 	if c.closed {
