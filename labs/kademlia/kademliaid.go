@@ -8,7 +8,7 @@ import (
 // the static number of bytes in a KademliaID
 const IDLength = 32 // 256 bit / 8 bits/byte = 32 bytes
 
-// type definition of a KademliaID
+// KademliaID is a 256-bit node or key identifier.
 type KademliaID [IDLength]byte
 
 // NewKademliaID returns a new instance of a KademliaID based on the string input

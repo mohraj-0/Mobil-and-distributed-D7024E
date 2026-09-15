@@ -2,9 +2,7 @@ package kademlia
 
 const bucketSize = 20
 
-
-// RoutingTable definition
-// keeps a refrence contact of me and an array of buckets
+// RoutingTable stores known contacts in fixed XOR-distance buckets.
 type RoutingTable struct {
 	me      Contact
 	buckets [IDLength * 8]*bucket

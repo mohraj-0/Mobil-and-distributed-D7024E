@@ -8,6 +8,7 @@ import (
 
 const defaultNetworkAddress = "127.0.0.1:8000"
 
+// Network sends Kademlia UDP control messages to other nodes.
 type Network struct {
 	Address string
 }
