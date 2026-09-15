@@ -4,21 +4,22 @@ import (
 	"container/list"
 )
 
-// bucket definition
-// contains a List
+// bucket är en k-bucket i routingtabellen.
+// Den håller en ordnad lista av kontakter där fronten är senast sedd kontakt.
 type bucket struct {
 	list *list.List
 }
 
-// newBucket returns a new instance of a bucket
+// newBucket skapar en tom bucket med en dubbellänkad lista.
 func newBucket() *bucket {
 	bucket := &bucket{}
 	bucket.list = list.New()
 	return bucket
 }
 
-// AddContact adds the Contact to the front of the bucket
-// or moves it to the front of the bucket if it already existed
+// AddContact lägger till en kontakt eller flyttar en redan känd kontakt längst fram.
+// Om bucketen är full och kontakten är ny droppas kontakten i denna förenklade
+// implementation, alltså ingen ping/eviction av äldsta noden görs.
 func (bucket *bucket) AddContact(contact Contact) {
 	var element *list.Element
 	for e := bucket.list.Front(); e != nil; e = e.Next() {
@@ -38,8 +39,8 @@ func (bucket *bucket) AddContact(contact Contact) {
 	}
 }
 
-// GetContactAndCalcDistance returns an array of Contacts where 
-// the distance has already been calculated
+// GetContactAndCalcDistance returnerar bucketens kontakter med avståndet till
+// target redan uträknat. Det behövs innan ContactCandidates kan sortera dem.
 func (bucket *bucket) GetContactAndCalcDistance(target *KademliaID) []Contact {
 	var contacts []Contact
 
@@ -52,7 +53,7 @@ func (bucket *bucket) GetContactAndCalcDistance(target *KademliaID) []Contact {
 	return contacts
 }
 
-// Len return the size of the bucket
+// Len returnerar hur många kontakter som ligger i bucketen.
 func (bucket *bucket) Len() int {
 	return bucket.list.Len()
 }

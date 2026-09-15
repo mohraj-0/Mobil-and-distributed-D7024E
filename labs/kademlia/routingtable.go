@@ -2,13 +2,15 @@ package kademlia
 
 const bucketSize = 20
 
-// RoutingTable stores known contacts in fixed XOR-distance buckets.
+// RoutingTable lagrar kända kontakter i fasta buckets baserade på XOR-avstånd.
+// me är den lokala noden; alla bucket-index räknas relativt till me.ID.
 type RoutingTable struct {
 	me      Contact
 	buckets [IDLength * 8]*bucket
 }
 
-// NewRoutingTable returns a new instance of a RoutingTable
+// NewRoutingTable skapar 256 buckets, en för varje möjlig första skiljande bit
+// i ett 256-bitars Kademlia-ID.
 func NewRoutingTable(me Contact) *RoutingTable {
 	routingTable := &RoutingTable{}
 	for i := 0; i < IDLength*8; i++ {
@@ -18,21 +20,26 @@ func NewRoutingTable(me Contact) *RoutingTable {
 	return routingTable
 }
 
-// AddContact add a new contact to the correct Bucket
+// AddContact lägger en kontakt i den bucket som motsvarar kontaktens XOR-avstånd
+// från den lokala nodens ID.
 func (routingTable *RoutingTable) AddContact(contact Contact) {
 	bucketIndex := routingTable.getBucketIndex(contact.ID)
 	bucket := routingTable.buckets[bucketIndex]
 	bucket.AddContact(contact)
 }
 
-// FindClosestContacts finds the count closest Contacts to the target in the RoutingTable
+// FindClosestContacts hämtar de count närmaste kontakterna till target.
+// Först undersöks targetens egen bucket, sedan närliggande buckets åt båda håll,
+// och till sist sorteras alla kandidater efter exakt XOR-avstånd.
 func (routingTable *RoutingTable) FindClosestContacts(target *KademliaID, count int) []Contact {
 	var candidates ContactCandidates
 	bucketIndex := routingTable.getBucketIndex(target)
 	bucket := routingTable.buckets[bucketIndex]
 
+	// Börja där target-ID:t skulle hamna relativt till vår egen nod.
 	candidates.Append(bucket.GetContactAndCalcDistance(target))
 
+	// Om den bucketen inte räcker, samla kontakter från buckets bredvid.
 	for i := 1; (bucketIndex-i >= 0 || bucketIndex+i < IDLength*8) && candidates.Len() < count; i++ {
 		if bucketIndex-i >= 0 {
 			bucket = routingTable.buckets[bucketIndex-i]
@@ -53,7 +60,8 @@ func (routingTable *RoutingTable) FindClosestContacts(target *KademliaID, count 
 	return candidates.GetContacts(count)
 }
 
-// getBucketIndex get the correct Bucket index for the KademliaID
+// getBucketIndex hittar vilken bucket ett ID tillhör.
+// Indexet är positionen för första 1-bit i XOR-avståndet mellan id och me.ID.
 func (routingTable *RoutingTable) getBucketIndex(id *KademliaID) int {
 	distance := id.CalcDistance(routingTable.me.ID)
 	for i := 0; i < IDLength; i++ {
