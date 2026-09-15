@@ -5,8 +5,7 @@ import (
 	"sort"
 )
 
-// Contact definition
-// stores the KademliaID, the ip address and the distance
+// Contact stores a node ID, network address, and calculated lookup distance.
 type Contact struct {
 	ID       *KademliaID
 	Address  string
@@ -34,8 +33,7 @@ func (contact *Contact) String() string {
 	return fmt.Sprintf(`contact("%s", "%s")`, contact.ID, contact.Address)
 }
 
-// ContactCandidates definition
-// stores an array of Contacts
+// ContactCandidates stores and sorts contacts by their calculated distance.
 type ContactCandidates struct {
 	contacts []Contact
 }

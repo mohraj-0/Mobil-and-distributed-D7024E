@@ -6,40 +6,39 @@ import (
 	"sync"
 )
 
-// Identifies a node in the simulated network.
+// Address identifies a node in the simulated network.
 type Address struct {
 	IP   string
 	Port int
 }
 
-// A message sent between simulated nodes.
+// Message is sent between simulated nodes.
 type Message struct {
 	From    Address
 	To      Address
 	Payload []byte
 }
 
-// General network contract.
+// SimulatedNetworkAPI defines the network operations used by simulated nodes.
 type SimulatedNetworkAPI interface {
 	Listen(addr Address) (Connection, error)
 	Dial(addr Address) (Connection, error)
 }
 
-// General connection contract.
+// Connection defines the send, receive, and close operations for a simulated link.
 type Connection interface {
 	Send(msg Message) error
 	Recv() (Message, error)
 	Close() error
 }
 
-// Simulated network.
-// Think: address -> receive channel
+// SimulatedNetwork routes messages between in-memory simulated addresses.
 type SimulatedNetwork struct {
 	mu        sync.RWMutex
 	listeners map[Address]chan Message
 }
 
-// Simulated connection.
+// SimulatedConnection sends to or receives from the simulated network.
 type SimulatedConnection struct {
 	addr    Address
 	network *SimulatedNetwork
