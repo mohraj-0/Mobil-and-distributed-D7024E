@@ -10,17 +10,17 @@ type Kademlia struct {
 }
 
 // LookupContact letar efter noder som ligger nära target nodens ID
-func (kademlia *Kademlia) LookupContact(target *Contact) {
+func (kademlia *Kademlia) LookupContact(target *Contact) []Contact {
 	// Kontrollerar att routing table finns
 	if kademlia.RoutingTable == nil {
 		fmt.Println("Routing table is not initialized")
-		return
+		return nil
 	}
 
 	// Kontrollerar att target finns
 	if target == nil || target.ID == nil {
 		fmt.Println("Target is invalid")
-		return
+		return nil
 	}
 
 	// Letar efter de 10 närmaste noderna till target ID
@@ -30,6 +30,8 @@ func (kademlia *Kademlia) LookupContact(target *Contact) {
 	for _, contact := range contacts {
 		fmt.Println("Found contact:", contact.String())
 	}
+
+	return contacts
 }
 
 // LookupData letar efter data som hör till en viss hash
