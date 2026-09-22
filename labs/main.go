@@ -1,47 +1,61 @@
-// TODO: Add package documentation for `main`, like this:
-// Package main something something...
+// Package main starts a small example of the Kademlia network.
 package main
 
 import (
 	"d7024e/kademlia"
+	"fmt"
 	"time"
 )
 
-//	func main() {
-//		fmt.Println("Pretending to run the kademlia app...")
-//		// Using stuff from the kademlia package here. Something like...
-//		id := kademlia.NewKademliaID("FFFFFFFF0000000000000000000000000000000000000000000000000000００００")
-//		contact := kademlia.NewContact(id, "localhost:8０００")
-//		fmt.Println(contact.String())
-//		fmt.Printf("%v\n", contact)
-//	}
-
 func main() {
+	// Skapa två riktiga UDP-noder.
+	nodeA := kademlia.NewUDPNode()
+	nodeB := kademlia.NewUDPNode()
 
-	// Startar en nod som lyssnar på UDP-port 8000
-	go kademlia.Listen("127.0.0.1", 8000)
+	// Starta node A på port 8000.
+	err := nodeA.Listen("127.0.0.1:8000")
+	if err != nil {
+		fmt.Println("Could not start node A:", err)
+		return
+	}
+	defer nodeA.Close()
 
-	// Nod B lyssnar på port 8001
-	go kademlia.Listen("127.0.0.1", 8001)
+	// Starta node B på port 8001.
+	err = nodeB.Listen("127.0.0.1:8001")
+	if err != nil {
+		fmt.Println("Could not start node B:", err)
+		return
+	}
+	defer nodeB.Close()
 
-	// Väntar lite så att listenern hinner starta
-	time.Sleep(1 * time.Second)
+	// Starta mottagning på node A i en goroutine.
+	go func() {
+		message, err := nodeA.Receive()
+		if err != nil {
+			fmt.Println("Receive error:", err)
+			return
+		}
 
-	// Skapar ett ID för noden
-	id := kademlia.NewKademliaID(
-		"FFFFFFFF00000000000000000000000000000000000000000000000000000000",
+		fmt.Println("Node A received from:", message.From)
+		fmt.Println("Message:", string(message.Data))
+	}()
+
+	// Vänta lite så mottagaren hinner starta.
+	time.Sleep(200 * time.Millisecond)
+
+	// Node B skickar ett PING till Node A.
+	err = nodeB.SendData(
+		"127.0.0.1:8000",
+		[]byte("PING"),
 	)
 
-	// Skapar en kontakt som pekar på noden som lyssnar
-	contact := kademlia.NewContact(id, "127.0.0.1:8000")
+	if err != nil {
+		fmt.Println("Send error:", err)
+		return
+	}
 
-	// Skapar ett Network-objekt
-	network := kademlia.Network{}
+	fmt.Println("Node B sent PING to Node A")
 
-	// Skickar PING till noden
-	network.SendPingMessage(&contact)
-
-	// Väntar lite så att meddelandet hinner tas emot
-	time.Sleep(1 * time.Second)
-
+	// Vänta så meddelandet hinner tas emot innan programmet avslutas.
+	time.Sleep(500 * time.Millisecond)
 }

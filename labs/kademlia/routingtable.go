@@ -23,6 +23,9 @@ func NewRoutingTable(me Contact) *RoutingTable {
 // AddContact lägger en kontakt i den bucket som motsvarar kontaktens XOR-avstånd
 // från den lokala nodens ID.
 func (routingTable *RoutingTable) AddContact(contact Contact) {
+	if contact.ID.Equals(routingTable.me.ID) {
+		return
+	}
 	bucketIndex := routingTable.getBucketIndex(contact.ID)
 	bucket := routingTable.buckets[bucketIndex]
 	bucket.AddContact(contact)

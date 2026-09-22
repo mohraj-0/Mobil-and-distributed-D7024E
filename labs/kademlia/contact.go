@@ -17,24 +17,53 @@ type Contact struct {
 // NewContact skapar en kontakt utan beräknat avstånd.
 // Avståndet beror på vilket target vi söker, så det räknas ut senare.
 func NewContact(id *KademliaID, address string) Contact {
-	return Contact{id, address, nil}
+	return Contact{
+		ID:       id,
+		Address:  address,
+		distance: nil,
+	}
 }
 
 // CalcDistance räknar ut XOR-avståndet från kontaktens ID till target.
 // Resultatet sparas i contact.distance så sorteringen kan jämföra kontakter.
 func (contact *Contact) CalcDistance(target *KademliaID) {
+	if contact == nil || contact.ID == nil || target == nil {
+		return
+	}
+
 	contact.distance = contact.ID.CalcDistance(target)
 }
 
 // Less säger om den här kontakten ligger närmare target än otherContact.
-// Den förutsätter att CalcDistance redan har körts för båda kontakterna.
+//
+// CalcDistance bör ha körts innan jämförelsen.
 func (contact *Contact) Less(otherContact *Contact) bool {
+	if contact == nil || otherContact == nil {
+		return false
+	}
+
+	if contact.distance == nil {
+		return false
+	}
+
+	if otherContact.distance == nil {
+		return true
+	}
+
 	return contact.distance.Less(otherContact.distance)
 }
 
 // String returnerar en kort textrepresentation för loggar och tester.
 func (contact *Contact) String() string {
-	return fmt.Sprintf(`contact("%s", "%s")`, contact.ID, contact.Address)
+	if contact == nil {
+		return `contact("<nil>", "")`
+	}
+
+	return fmt.Sprintf(
+		`contact("%s", "%s")`,
+		contact.ID,
+		contact.Address,
+	)
 }
 
 // ContactCandidates är en sorteringshjälp för lookup-resultat.
@@ -45,14 +74,22 @@ type ContactCandidates struct {
 
 // Append lägger till flera kontakter i kandidatlistan.
 func (candidates *ContactCandidates) Append(contacts []Contact) {
-	candidates.contacts = append(candidates.contacts, contacts...)
+	candidates.contacts = append(
+		candidates.contacts,
+		contacts...,
+	)
 }
 
 // GetContacts returnerar de första count kontakterna efter sortering.
 func (candidates *ContactCandidates) GetContacts(count int) []Contact {
+	if count < 0 {
+		count = 0
+	}
+
 	if count > len(candidates.contacts) {
 		count = len(candidates.contacts)
 	}
+
 	return candidates.contacts[:count]
 }
 
@@ -68,10 +105,15 @@ func (candidates *ContactCandidates) Len() int {
 
 // Swap byter plats på två kandidater och används av sort.Sort.
 func (candidates *ContactCandidates) Swap(i, j int) {
-	candidates.contacts[i], candidates.contacts[j] = candidates.contacts[j], candidates.contacts[i]
+	candidates.contacts[i],
+		candidates.contacts[j] =
+		candidates.contacts[j],
+		candidates.contacts[i]
 }
 
 // Less jämför två kandidater baserat på deras beräknade XOR-avstånd.
 func (candidates *ContactCandidates) Less(i, j int) bool {
-	return candidates.contacts[i].Less(&candidates.contacts[j])
+	return candidates.contacts[i].Less(
+		&candidates.contacts[j],
+	)
 }

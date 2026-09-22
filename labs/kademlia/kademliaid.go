@@ -5,69 +5,116 @@ import (
 	"math/rand"
 )
 
-// IDLength är antal bytes i ett Kademlia-ID: 32 bytes = 256 bitar.
-const IDLength = 32 // 256 bit / 8 bits/byte = 32 bytes
+// IDLength är antal bytes i ett Kademlia-ID:
+// 32 bytes = 256 bitar.
+const IDLength = 32
 
 // KademliaID är ett 256-bitars ID för både noder och data-keys.
-// Samma typ används för node lookup och data lookup eftersom Kademlia placerar
-// allt i samma ID-rymd.
 type KademliaID [IDLength]byte
 
 // NewKademliaID skapar ett ID från en hex-sträng.
-// Strängen måste representera 32 bytes, alltså 64 hex-tecken.
+// Strängen måste innehålla exakt 64 hex-tecken.
 func NewKademliaID(data string) *KademliaID {
-	decoded, _ := hex.DecodeString(data)
+	decoded, err := hex.DecodeString(data)
+
+	if err != nil || len(decoded) != IDLength {
+		return nil
+	}
 
 	newKademliaID := KademliaID{}
-	for i := 0; i < IDLength; i++ {
-		newKademliaID[i] = decoded[i]
-	}
+
+	copy(
+		newKademliaID[:],
+		decoded,
+	)
 
 	return &newKademliaID
 }
 
-// NewRandomKademliaID skapar ett slumpmässigt node-ID.
-// Den här enkla varianten använder math/rand och är främst för labb/test.
+// NewRandomKademliaID skapar ett slumpmässigt Kademlia-ID.
 func NewRandomKademliaID() *KademliaID {
 	newKademliaID := KademliaID{}
+
 	for i := 0; i < IDLength; i++ {
-		newKademliaID[i] = uint8(rand.Intn(256))
+		newKademliaID[i] =
+			uint8(rand.Intn(256))
 	}
+
 	return &newKademliaID
 }
 
-// Less jämför två ID:n byte för byte som stora heltal.
-// Det används när XOR-avstånd ska sorteras från närmast till längst bort.
-func (kademliaID KademliaID) Less(otherKademliaID *KademliaID) bool {
+// Less jämför två ID:n byte för byte.
+//
+// Används bland annat för att sortera XOR-avstånd.
+func (kademliaID KademliaID) Less(
+	otherKademliaID *KademliaID,
+) bool {
+
+	if otherKademliaID == nil {
+		return false
+	}
+
 	for i := 0; i < IDLength; i++ {
+
 		if kademliaID[i] != otherKademliaID[i] {
-			return kademliaID[i] < otherKademliaID[i]
+			return kademliaID[i] <
+				otherKademliaID[i]
 		}
 	}
+
 	return false
 }
 
-// Equals kontrollerar om två ID:n är exakt lika.
-func (kademliaID KademliaID) Equals(otherKademliaID *KademliaID) bool {
+// Equals kontrollerar om två Kademlia-ID:n är lika.
+func (kademliaID KademliaID) Equals(
+	otherKademliaID *KademliaID,
+) bool {
+
+	if otherKademliaID == nil {
+		return false
+	}
+
 	for i := 0; i < IDLength; i++ {
-		if kademliaID[i] != otherKademliaID[i] {
+
+		if kademliaID[i] !=
+			otherKademliaID[i] {
+
 			return false
 		}
 	}
+
 	return true
 }
 
-// CalcDistance räknar ut Kademlia-avståndet mellan två ID:n med XOR.
-// Ju mindre XOR-resultat, desto närmare ligger noderna/keys i ID-rymden.
-func (kademliaID KademliaID) CalcDistance(target *KademliaID) *KademliaID {
-	result := KademliaID{}
-	for i := 0; i < IDLength; i++ {
-		result[i] = kademliaID[i] ^ target[i]
+// CalcDistance räknar XOR-avståndet mellan två ID:n.
+//
+// Ju mindre XOR-resultat,
+// desto närmare ligger ID:na i Kademlia.
+func (kademliaID KademliaID) CalcDistance(
+	target *KademliaID,
+) *KademliaID {
+
+	if target == nil {
+		return nil
 	}
+
+	result := KademliaID{}
+
+	for i := 0; i < IDLength; i++ {
+		result[i] =
+			kademliaID[i] ^ target[i]
+	}
+
 	return &result
 }
 
-// String gör ID:t till hex så att det kan loggas och jämföras som text.
+// String konverterar ID:t till en hex-sträng.
 func (kademliaID *KademliaID) String() string {
-	return hex.EncodeToString(kademliaID[0:IDLength])
+	if kademliaID == nil {
+		return ""
+	}
+
+	return hex.EncodeToString(
+		kademliaID[:],
+	)
 }

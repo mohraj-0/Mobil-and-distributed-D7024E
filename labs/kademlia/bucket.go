@@ -25,8 +25,9 @@ func (bucket *bucket) AddContact(contact Contact) {
 	for e := bucket.list.Front(); e != nil; e = e.Next() {
 		nodeID := e.Value.(Contact).ID
 
-		if (contact).ID.Equals(nodeID) {
+		if contact.ID.Equals(nodeID) {
 			element = e
+			break
 		}
 	}
 

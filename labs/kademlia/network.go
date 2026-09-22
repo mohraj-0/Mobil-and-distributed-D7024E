@@ -3,145 +3,370 @@ package kademlia
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
+	"sync"
+	"time"
 )
 
-const defaultNetworkAddress = "127.0.0.1:8000"
-
-// Network skickar Kademlia-kontrollmeddelanden över UDP.
-// Address används av FIND_DATA och STORE som mottagaradress; om den är tom
-// används defaultNetworkAddress.
-type Network struct {
-	Address string
+// Message representerar ett meddelande mellan två noder.
+type Message struct {
+	From string
+	Data []byte
 }
 
-// Listen startar en UDP-lyssnare för en nod.
-// Funktionen blockerar i en loop och skriver ut varje mottaget UDP-meddelande.
-func Listen(ip string, port int) {
-	address := fmt.Sprintf("%s:%d", ip, port)
+// Node beskriver vad Kademlia behöver från nätverket.
+//
+// Kademlia-logiken behöver inte veta om kommunikationen sker
+// via riktig UDP eller via ett simulerat nätverk.
+type Node interface {
+	Listen(address string) error
+	Close() error
+	Receive() (Message, error)
+	SendData(address string, data []byte) error
+}
 
-	// ResolveUDPAddr gör textadressen, t.ex. "127.0.0.1:8000",
-	// till en UDP-adress som net-paketet kan binda till.
-	udpAddr, err := net.ResolveUDPAddr("udp", address)
+//
+// ============================================================
+// UDP NODE
+// ============================================================
+//
+
+// UDPNode används när noder kommunicerar över riktigt UDP-nätverk.
+type UDPNode struct {
+	conn *net.UDPConn
+}
+
+// NewUDPNode skapar en ny UDP-node.
+func NewUDPNode() *UDPNode {
+	return &UDPNode{}
+}
+
+// Listen öppnar UDP-porten för noden.
+func (node *UDPNode) Listen(address string) error {
+	if address == "" {
+		return errors.New("address cannot be empty")
+	}
+
+	udpAddress, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
-		fmt.Println("Error resolving UDP address:", err)
-		return
+		return fmt.Errorf("invalid UDP address %q: %w", address, err)
 	}
 
-	// ListenUDP öppnar porten så att andra noder kan skicka UDP-paket hit.
-	conn, err := net.ListenUDP("udp", udpAddr)
+	conn, err := net.ListenUDP("udp", udpAddress)
 	if err != nil {
-		fmt.Println("Error listening on UDP:", err)
-		return
-	}
-	defer conn.Close()
-
-	fmt.Println("Listening on", address)
-
-	buffer := make([]byte, 1024)
-	for {
-		// ReadFromUDP väntar tills ett UDP-paket kommer in.
-		// remoteAddr är avsändarens adress och buffer[:n] är själva meddelandet.
-		n, remoteAddr, err := conn.ReadFromUDP(buffer)
-		if err != nil {
-			fmt.Println("Error reading from UDP:", err)
-			continue
-		}
-
-		fmt.Println("Message from:", remoteAddr)
-		fmt.Println("Message:", string(buffer[:n]))
-	}
-}
-
-// SendPingMessage skickar ett PING till en kontakt.
-// PING används för att kontrollera att en annan nod går att nå.
-func (network *Network) SendPingMessage(contact *Contact) error {
-	if contact == nil {
-		return errors.New("contact is nil")
+		return fmt.Errorf("could not listen on %q: %w", address, err)
 	}
 
-	// Kontaktens Address är mottagaren, t.ex. "127.0.0.1:8001".
-	if err := network.sendUDPMessage(contact.Address, []byte("PING")); err != nil {
-		fmt.Println("Error sending PING:", err)
-		return err
-	}
+	node.conn = conn
 
-	fmt.Println("PING sent to", contact.Address)
 	return nil
 }
 
-// SendFindContactMessage skickar FIND_CONTACT till en kontakt.
-// I en full Kademlia-implementation skulle mottagaren svara med noder som
-// ligger nära ett target-ID. Här skickas bara kontrollmeddelandet.
-func (network *Network) SendFindContactMessage(contact *Contact) error {
-	if contact == nil {
-		return errors.New("contact is nil")
+// Close stänger UDP-anslutningen.
+func (node *UDPNode) Close() error {
+	if node.conn == nil {
+		return nil
 	}
 
-	if err := network.sendUDPMessage(contact.Address, []byte("FIND_CONTACT")); err != nil {
-		fmt.Println("Error sending FIND_CONTACT:", err)
-		return err
-	}
-
-	fmt.Println("FIND_CONTACT sent to", contact.Address)
-	return nil
+	return node.conn.Close()
 }
 
-// SendFindDataMessage skickar FIND_DATA följt av en hash/key.
-// Hashen fungerar som target-ID när man letar efter data i Kademlia-ID-rymden.
-func (network *Network) SendFindDataMessage(hash string) error {
-	message := []byte("FIND_DATA " + hash)
-	if err := network.sendUDPMessage(network.destinationAddress(), message); err != nil {
-		fmt.Println("Error sending FIND_DATA:", err)
-		return err
+// Receive väntar på ett UDP-meddelande.
+func (node *UDPNode) Receive() (Message, error) {
+	if node.conn == nil {
+		return Message{}, errors.New("UDP node is not listening")
 	}
 
-	fmt.Println("FIND_DATA sent for hash:", hash)
-	return nil
-}
+	buffer := make([]byte, 4096)
 
-// SendStoreMessage skickar STORE följt av bytes som ska lagras.
-// Den här funktionen skickar bara meddelandet; den implementerar inte en lokal datastore.
-func (network *Network) SendStoreMessage(data []byte) error {
-	message := append([]byte("STORE "), data...)
-	if err := network.sendUDPMessage(network.destinationAddress(), message); err != nil {
-		fmt.Println("Error sending STORE:", err)
-		return err
-	}
-
-	fmt.Println("STORE message sent")
-	return nil
-}
-
-// destinationAddress väljer mottagare för meddelanden som inte har en Contact.
-// Detta gör tester enklare eftersom testet kan sätta Network.Address till en
-// tillfällig UDP-port.
-func (network *Network) destinationAddress() string {
-	if network.Address != "" {
-		return network.Address
-	}
-	return defaultNetworkAddress
-}
-
-// sendUDPMessage är den gemensamma lågnivåfunktionen för alla UDP-sändningar.
-// De publika Send...-funktionerna bygger först rätt payload och skickar sedan hit.
-func (network *Network) sendUDPMessage(address string, message []byte) error {
-	udpAddr, err := net.ResolveUDPAddr("udp", address)
+	n, remoteAddress, err := node.conn.ReadFromUDP(buffer)
 	if err != nil {
-		return fmt.Errorf("resolve UDP address %q: %w", address, err)
+		return Message{}, fmt.Errorf("could not receive UDP packet: %w", err)
 	}
 
-	// DialUDP skapar en UDP-anslutning till mottagaren. UDP är connectionless,
-	// men Go använder conn-objektet för Write-anropet.
-	conn, err := net.DialUDP("udp", nil, udpAddr)
+	// Kopiera bara de bytes som faktiskt togs emot.
+	data := make([]byte, n)
+	copy(data, buffer[:n])
+
+	return Message{
+		From: remoteAddress.String(),
+		Data: data,
+	}, nil
+}
+
+// SendData skickar ett UDP-meddelande till en annan nod.
+func (node *UDPNode) SendData(address string, data []byte) error {
+	if node.conn == nil {
+		return errors.New("UDP node is not listening")
+	}
+
+	if address == "" {
+		return errors.New("destination address cannot be empty")
+	}
+
+	remoteAddress, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
-		return fmt.Errorf("connect to UDP address %q: %w", address, err)
+		return fmt.Errorf("invalid destination address %q: %w", address, err)
 	}
-	defer conn.Close()
 
-	if _, err := conn.Write(message); err != nil {
-		return fmt.Errorf("write UDP message to %q: %w", address, err)
+	_, err = node.conn.WriteToUDP(data, remoteAddress)
+	if err != nil {
+		return fmt.Errorf("could not send UDP packet: %w", err)
 	}
 
 	return nil
+}
+
+//
+// ============================================================
+// SIMULATED NETWORK
+// ============================================================
+//
+
+// SimulatedNetwork används för tester med många noder.
+//
+// Alla noder körs i samma program och använder Go-channels
+// istället för riktiga UDP-paket.
+type SimulatedNetwork struct {
+	mu sync.RWMutex
+
+	nodes map[string]*SimulatedNode
+
+	packetLoss float64
+	latency    time.Duration
+
+	sentPackets     int
+	receivedPackets int
+	droppedPackets  int
+}
+
+// NewSimulatedNetwork skapar ett nytt simulerat nätverk.
+//
+// packetLoss:
+// 0.0 = inga paket tappas
+// 0.1 = ungefär 10 % tappas
+// 1.0 = alla paket tappas
+//
+// latency:
+// exempel: 10 * time.Millisecond
+func NewSimulatedNetwork(
+	packetLoss float64,
+	latency time.Duration,
+) *SimulatedNetwork {
+
+	if packetLoss < 0 {
+		packetLoss = 0
+	}
+
+	if packetLoss > 1 {
+		packetLoss = 1
+	}
+
+	return &SimulatedNetwork{
+		nodes:      make(map[string]*SimulatedNode),
+		packetLoss: packetLoss,
+		latency:    latency,
+	}
+}
+
+// NewNode skapar en ny nod i det simulerade nätverket.
+func (network *SimulatedNetwork) NewNode(address string) (*SimulatedNode, error) {
+	if address == "" {
+		return nil, errors.New("address cannot be empty")
+	}
+
+	network.mu.Lock()
+	defer network.mu.Unlock()
+
+	if _, exists := network.nodes[address]; exists {
+		return nil, fmt.Errorf("node %q already exists", address)
+	}
+
+	node := &SimulatedNode{
+		address: address,
+		network: network,
+		inbox:   make(chan Message, 100),
+	}
+
+	network.nodes[address] = node
+
+	return node, nil
+}
+
+// removeNode tar bort en nod från nätverket.
+func (network *SimulatedNetwork) removeNode(address string) {
+	network.mu.Lock()
+	defer network.mu.Unlock()
+
+	delete(network.nodes, address)
+}
+
+// Stats returnerar enkel statistik för experiment.
+//
+// Detta kan senare användas i rapporten.
+func (network *SimulatedNetwork) Stats() (
+	sent int,
+	received int,
+	dropped int,
+) {
+	network.mu.RLock()
+	defer network.mu.RUnlock()
+
+	return network.sentPackets,
+		network.receivedPackets,
+		network.droppedPackets
+}
+
+//
+// ============================================================
+// SIMULATED NODE
+// ============================================================
+//
+
+// SimulatedNode fungerar som en vanlig Node men använder channels
+// istället för UDP.
+type SimulatedNode struct {
+	address string
+	network *SimulatedNetwork
+	inbox   chan Message
+
+	closed bool
+	mu     sync.RWMutex
+}
+
+// Listen behövs för att SimulatedNode ska implementera Node.
+//
+// Noden skapas redan med en adress via network.NewNode(),
+// därför kontrollerar vi bara att adressen stämmer.
+func (node *SimulatedNode) Listen(address string) error {
+	if address == "" {
+		return errors.New("address cannot be empty")
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	if node.address == "" {
+		node.address = address
+	}
+
+	if node.address != address {
+		return fmt.Errorf(
+			"node already has address %q",
+			node.address,
+		)
+	}
+
+	node.closed = false
+
+	return nil
+}
+
+// Close markerar noden som stängd och tar bort den från nätverket.
+func (node *SimulatedNode) Close() error {
+	node.mu.Lock()
+
+	if node.closed {
+		node.mu.Unlock()
+		return nil
+	}
+
+	node.closed = true
+	node.mu.Unlock()
+
+	node.network.removeNode(node.address)
+
+	return nil
+}
+
+// Receive väntar tills ett meddelande kommer till noden.
+func (node *SimulatedNode) Receive() (Message, error) {
+	node.mu.RLock()
+	closed := node.closed
+	node.mu.RUnlock()
+
+	if closed {
+		return Message{}, errors.New("node is closed")
+	}
+
+	message, ok := <-node.inbox
+	if !ok {
+		return Message{}, errors.New("node inbox is closed")
+	}
+
+	node.network.mu.Lock()
+	node.network.receivedPackets++
+	node.network.mu.Unlock()
+
+	return message, nil
+}
+
+// SendData skickar ett meddelande genom det simulerade nätverket.
+func (node *SimulatedNode) SendData(
+	address string,
+	data []byte,
+) error {
+
+	if address == "" {
+		return errors.New("destination address cannot be empty")
+	}
+
+	node.mu.RLock()
+	closed := node.closed
+	node.mu.RUnlock()
+
+	if closed {
+		return errors.New("node is closed")
+	}
+
+	node.network.mu.Lock()
+
+	node.network.sentPackets++
+
+	target, exists := node.network.nodes[address]
+
+	// Simulera packet loss.
+	if rand.Float64() < node.network.packetLoss {
+		node.network.droppedPackets++
+		node.network.mu.Unlock()
+		return nil
+	}
+
+	latency := node.network.latency
+
+	node.network.mu.Unlock()
+
+	if !exists {
+		return fmt.Errorf(
+			"destination node %q does not exist",
+			address,
+		)
+	}
+
+	// Kopiera datan så att avsändaren inte kan ändra innehållet
+	// efter att meddelandet skickats.
+	messageData := make([]byte, len(data))
+	copy(messageData, data)
+
+	message := Message{
+		From: node.address,
+		Data: messageData,
+	}
+
+	// Om latency är satt simulerar vi nätverksfördröjning.
+	if latency > 0 {
+		time.Sleep(latency)
+	}
+
+	select {
+	case target.inbox <- message:
+		return nil
+
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf(
+			"timed out sending message to %q",
+			address,
+		)
+	}
 }
