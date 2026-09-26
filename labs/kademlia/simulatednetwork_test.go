@@ -225,40 +225,106 @@ func TestSimulatedNetworkWorksFor1000Nodes(t *testing.T) {
 		0*time.Millisecond,
 	)
 
-	nodes := make(
-		map[string]*kademlia.SimulatedNode,
-		nodeCount,
-	)
+	nodes := make([]*kademlia.SimulatedNode, nodeCount)
 
+	// Skapa 1000 noder.
 	for i := 0; i < nodeCount; i++ {
 		address := fmt.Sprintf("node-%d", i)
 
 		node, err := network.NewNode(address)
 		if err != nil {
+			t.Fatalf("create node %d: %v", i, err)
+		}
+
+		nodes[i] = node
+	}
+
+	defer func() {
+		for _, node := range nodes {
+			_ = node.Close()
+		}
+	}()
+
+	// Varje nod skickar ett meddelande till nästa nod.
+	//
+	// node-0 -> node-1
+	// node-1 -> node-2
+	// ...
+	// node-999 -> node-0
+	for i := 0; i < nodeCount; i++ {
+		next := (i + 1) % nodeCount
+
+		destination := fmt.Sprintf("node-%d", next)
+		message := fmt.Sprintf("hello-from-node-%d", i)
+
+		err := nodes[i].SendData(
+			destination,
+			[]byte(message),
+		)
+
+		if err != nil {
 			t.Fatalf(
-				"create node %d: %v",
+				"node %d could not send to node %d: %v",
+				i,
+				next,
+				err,
+			)
+		}
+	}
+
+	// Kontrollera att alla 1000 noder faktiskt fick sitt meddelande.
+	for i := 0; i < nodeCount; i++ {
+		previous := (i - 1 + nodeCount) % nodeCount
+
+		got, err := nodes[i].Receive()
+		if err != nil {
+			t.Fatalf(
+				"node %d could not receive: %v",
 				i,
 				err,
 			)
 		}
 
-		nodes[address] = node
+		wantSender := fmt.Sprintf("node-%d", previous)
+		wantData := fmt.Sprintf("hello-from-node-%d", previous)
+
+		if got.From != wantSender {
+			t.Fatalf(
+				"node %d received from %q, want %q",
+				i,
+				got.From,
+				wantSender,
+			)
+		}
+
+		if string(got.Data) != wantData {
+			t.Fatalf(
+				"node %d received %q, want %q",
+				i,
+				string(got.Data),
+				wantData,
+			)
+		}
 	}
 
-	if len(nodes) != nodeCount {
-		t.Fatalf(
-			"created %d nodes, want %d",
-			len(nodes),
-			nodeCount,
-		)
+	sent, received, dropped := network.Stats()
+
+	if sent != nodeCount {
+		t.Fatalf("sent=%d, want %d", sent, nodeCount)
+	}
+
+	if received != nodeCount {
+		t.Fatalf("received=%d, want %d", received, nodeCount)
+	}
+
+	if dropped != 0 {
+		t.Fatalf("dropped=%d, want 0", dropped)
 	}
 
 	t.Logf(
-		"successfully created %d simulated nodes",
-		len(nodes),
+		"1000-node network works: sent=%d received=%d dropped=%d",
+		sent,
+		received,
+		dropped,
 	)
-
-	for _, node := range nodes {
-		_ = node.Close()
-	}
 }
