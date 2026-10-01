@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"d7024e/kademlia"
+	"github.com/spf13/cobra"
 )
 
 const localAddress = "127.0.0.1:8000"
@@ -24,8 +25,10 @@ type shell struct {
 
 func main() {
 	s := newShell(localAddress)
+	cmd := s.root()
 	if len(os.Args) > 1 {
-		if err := s.run(os.Args[1:]); err != nil {
+		cmd.SetArgs(os.Args[1:])
+		if err := cmd.Execute(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -57,42 +60,49 @@ func (s *shell) repl() {
 		if len(args) == 0 {
 			continue
 		}
-		if err := s.run(args); err != nil {
+		cmd := s.root()
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
 			fmt.Println(err)
 		}
 	}
 }
 
-func (s *shell) run(args []string) error {
-	switch args[0] {
-	case "ping":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: ping IP:PORT")
-		}
-		return s.ping(args[1])
-	case "put":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: put FILENAME")
-		}
-		return s.put(args[1])
-	case "get":
-		if len(args) < 2 || len(args) > 3 {
-			return fmt.Errorf("usage: get KEY [FILENAME]")
-		}
-		out := ""
-		if len(args) == 3 {
-			out = args[2]
-		}
-		return s.get(args[1], out)
-	case "show":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: show rt|ds")
-		}
-		return s.show(args[1])
-	case "exit", "quit":
-		os.Exit(0)
-	}
-	return fmt.Errorf("unknown command %q", args[0])
+func (s *shell) root() *cobra.Command {
+	root := &cobra.Command{Use: "simshell", SilenceUsage: true, SilenceErrors: true}
+	root.AddCommand(
+		&cobra.Command{Use: "ping IP:PORT", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
+			return s.ping(a[0])
+		}},
+		&cobra.Command{Use: "put FILENAME", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
+			return s.put(a[0])
+		}},
+		&cobra.Command{Use: "get KEY [FILENAME]", Args: cobra.RangeArgs(1, 2), RunE: func(_ *cobra.Command, a []string) error {
+			out := ""
+			if len(a) == 2 {
+				out = a[1]
+			}
+			return s.get(a[0], out)
+		}},
+		s.showCmd(),
+		&cobra.Command{Use: "exit", Aliases: []string{"quit"}, Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
+			os.Exit(0)
+		}},
+	)
+	return root
+}
+
+func (s *shell) showCmd() *cobra.Command {
+	show := &cobra.Command{Use: "show", Args: cobra.NoArgs}
+	show.AddCommand(
+		&cobra.Command{Use: "rt", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+			return s.show("rt")
+		}},
+		&cobra.Command{Use: "ds", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+			return s.show("ds")
+		}},
+	)
+	return show
 }
 
 func (s *shell) ping(rawAddr string) error {
