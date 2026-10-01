@@ -85,6 +85,50 @@ func TestLookupContactSequentialAlphaOneFindsCloserContacts(t *testing.T) {
 	t.Logf("example final closest contact: target=%s closest=%s", target.ID, contacts[0].ID)
 }
 
+func TestJoinNetworkLooksUpSelfAndRefreshesBuckets(t *testing.T) {
+	t.Log("testing full join: bootstrap insert, self lookup, and bucket refresh")
+
+	me := kademlia.NewContact(kademliaTestID("00"), "127.0.0.1:8000")
+	bootstrap := kademlia.NewContact(kademliaTestID("80"), "127.0.0.1:8001")
+	peer := kademlia.NewContact(kademliaTestID("40"), "127.0.0.1:8002")
+
+	node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(me)}
+	bootstrapTable := kademlia.NewRoutingTable(bootstrap)
+	bootstrapTable.AddContact(peer)
+
+	fakeLookup := kademlia.NewFakeContactLookup(map[string]*kademlia.RoutingTable{
+		bootstrap.ID.String(): bootstrapTable,
+	})
+
+	queriedTargets := make([]string, 0)
+	node.ContactLookup = func(contact kademlia.Contact, targetID *kademlia.KademliaID, count int) []kademlia.Contact {
+		queriedTargets = append(queriedTargets, targetID.String())
+		t.Logf("join query: asking %s for contacts close to %s", contact.ID, targetID)
+		return fakeLookup(contact, targetID, count)
+	}
+
+	contacts := node.JoinNetwork(bootstrap)
+	if len(contacts) < 2 {
+		t.Fatalf("JoinNetwork returned %d contacts, want at least bootstrap and peer", len(contacts))
+	}
+
+	closestToPeer := node.RoutingTable.FindClosestContacts(peer.ID, 1)
+	if len(closestToPeer) != 1 || !closestToPeer[0].ID.Equals(peer.ID) {
+		t.Fatalf("join did not add discovered peer to routing table")
+	}
+
+	if len(queriedTargets) == 0 || queriedTargets[0] != me.ID.String() {
+		t.Fatalf("first join query target = %v, want own node ID %s", queriedTargets, me.ID)
+	}
+
+	for _, bucketIndex := range node.RoutingTable.NonEmptyBucketIndices() {
+		refreshTarget := node.RoutingTable.RefreshIDForBucket(bucketIndex).String()
+		if !containsString(queriedTargets, refreshTarget) {
+			t.Fatalf("bucket %d was not refreshed; query targets were %v", bucketIndex, queriedTargets)
+		}
+	}
+}
+
 func TestLookupDataEmptyHash(t *testing.T) {
 	t.Log("testing that LookupData handles an empty hash without sending a message")
 
@@ -101,4 +145,13 @@ func TestStoreEmptyData(t *testing.T) {
 
 func kademliaTestID(prefix string) *kademlia.KademliaID {
 	return kademlia.NewKademliaID(prefix + "00000000000000000000000000000000000000000000000000000000000000")
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

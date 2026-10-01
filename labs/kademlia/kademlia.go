@@ -15,6 +15,58 @@ type Kademlia struct {
 	ContactLookup func(contact Contact, target *KademliaID, count int) []Contact
 }
 
+// JoinNetwork joins an existing Kademlia network through a bootstrap contact.
+// It inserts the bootstrap contact, looks up this node's own ID, then refreshes
+// every bucket that contains at least one contact.
+func (kademlia *Kademlia) JoinNetwork(bootstrap Contact) []Contact {
+	if kademlia.RoutingTable == nil {
+		fmt.Println("Routing table is not initialized")
+		return nil
+	}
+	if bootstrap.ID == nil {
+		fmt.Println("Bootstrap contact is invalid")
+		return nil
+	}
+
+	// The bootstrap contact is the first known route into the network.
+	kademlia.RoutingTable.AddContact(bootstrap)
+
+	// A joining node first searches for itself. The replies populate its table
+	// with nodes near its own ID and also teach contacted nodes about us.
+	contacts := kademlia.lookupContactSequential(kademlia.RoutingTable.Me().ID, lookupContactCount)
+	kademlia.addContactsToRoutingTable(contacts)
+
+	// After the self-lookup, refresh every bucket range that has become known.
+	// This is the extra step that makes the join procedure complete.
+	refreshed := kademlia.RefreshBuckets()
+	contacts = append(contacts, refreshed...)
+	kademlia.addContactsToRoutingTable(contacts)
+
+	return kademlia.RoutingTable.FindClosestContacts(kademlia.RoutingTable.Me().ID, lookupContactCount)
+}
+
+// RefreshBuckets runs a lookup for one representative ID in each non-empty
+// bucket. That lookup refreshes the bucket range and can discover more contacts.
+func (kademlia *Kademlia) RefreshBuckets() []Contact {
+	if kademlia.RoutingTable == nil {
+		fmt.Println("Routing table is not initialized")
+		return nil
+	}
+
+	var discovered []Contact
+	for _, bucketIndex := range kademlia.RoutingTable.NonEmptyBucketIndices() {
+		// The routing table provides an ID inside the bucket's range; doing a
+		// normal node lookup for it refreshes that range through the same lookup
+		// logic used by STORE/GET routing.
+		target := kademlia.RoutingTable.RefreshIDForBucket(bucketIndex)
+		contacts := kademlia.lookupContactSequential(target, lookupContactCount)
+		kademlia.addContactsToRoutingTable(contacts)
+		discovered = append(discovered, contacts...)
+	}
+
+	return discovered
+}
+
 // LookupContact hittar kontakter vars node-ID ligger nära target.ID.
 // Den använder en iterativ lookup med alpha = 1: en kontakt frågas åt gången.
 func (kademlia *Kademlia) LookupContact(target *Contact) []Contact {
@@ -87,6 +139,9 @@ func (kademlia *Kademlia) lookupContactSequential(target *KademliaID, count int)
 		// ContactLookup motsvarar FIND_NODE/FIND_CONTACT i nätverket.
 		// Den frågade noden returnerar kontakter som den känner till nära target.
 		addContacts(kademlia.ContactLookup(next, target, count))
+		// Successful lookups are also routing-table maintenance: every live
+		// contact we learn can help future joins, stores, and gets.
+		kademlia.addContactsToRoutingTable(candidates)
 		sortContactsByDistance(candidates)
 		candidates = firstContacts(candidates, count)
 
@@ -98,6 +153,15 @@ func (kademlia *Kademlia) lookupContactSequential(target *KademliaID, count int)
 	}
 
 	return candidates
+}
+
+func (kademlia *Kademlia) addContactsToRoutingTable(contacts []Contact) {
+	if kademlia.RoutingTable == nil {
+		return
+	}
+	for _, contact := range contacts {
+		kademlia.RoutingTable.AddContact(contact)
+	}
 }
 
 // sortContactsByDistance sorterar kandidater efter deras redan uträknade XOR-avstånd.

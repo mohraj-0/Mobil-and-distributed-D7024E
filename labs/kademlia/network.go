@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 )
 
 const defaultNetworkAddress = "127.0.0.1:8000"
@@ -141,6 +142,164 @@ func (network *Network) sendUDPMessage(address string, message []byte) error {
 
 	if _, err := conn.Write(message); err != nil {
 		return fmt.Errorf("write UDP message to %q: %w", address, err)
+	}
+
+	return nil
+}
+
+// Address identifies a node in the in-memory network used by tests and the CLI.
+// It mirrors a UDP address without opening a socket.
+type Address struct {
+	IP   string
+	Port int
+}
+
+// Message is the common message envelope for the in-memory network.
+type Message struct {
+	From    Address
+	To      Address
+	Payload []byte
+}
+
+// SimulatedNetworkAPI describes the operations a node needs from a network:
+// listening on an address and dialing another address.
+type SimulatedNetworkAPI interface {
+	Listen(addr Address) (Connection, error)
+	Dial(addr Address) (Connection, error)
+}
+
+// Connection is an in-memory link. Listener connections can receive messages;
+// dialed connections are used for sending.
+type Connection interface {
+	Send(msg Message) error
+	Recv() (Message, error)
+	Close() error
+}
+
+// SimulatedNetwork routes messages between addresses with Go channels.
+type SimulatedNetwork struct {
+	mu        sync.RWMutex
+	listeners map[Address]chan Message
+}
+
+// SimulatedConnection is a connection against SimulatedNetwork.
+type SimulatedConnection struct {
+	addr    Address
+	network *SimulatedNetwork
+	recvCh  chan Message
+	closed  bool
+	mu      sync.RWMutex
+}
+
+const simulatedNetworkBufferSize = 1024
+
+// NewSimulatedNetwork creates an empty in-memory network.
+func NewSimulatedNetwork() *SimulatedNetwork {
+	return &SimulatedNetwork{
+		listeners: make(map[Address]chan Message),
+	}
+}
+
+// Listen registers an address so it can receive in-memory messages.
+func (n *SimulatedNetwork) Listen(addr Address) (Connection, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if _, exists := n.listeners[addr]; exists {
+		return nil, fmt.Errorf("address already in use: %+v", addr)
+	}
+
+	recvCh := make(chan Message, simulatedNetworkBufferSize)
+	n.listeners[addr] = recvCh
+
+	return &SimulatedConnection{
+		addr:    addr,
+		network: n,
+		recvCh:  recvCh,
+	}, nil
+}
+
+// Dial creates a sending connection to a registered in-memory address.
+func (n *SimulatedNetwork) Dial(addr Address) (Connection, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if _, exists := n.listeners[addr]; !exists {
+		return nil, fmt.Errorf("address not found: %+v", addr)
+	}
+
+	return &SimulatedConnection{
+		addr:    addr,
+		network: n,
+	}, nil
+}
+
+// Send places a message in the destination listener's channel.
+func (c *SimulatedConnection) Send(msg Message) error {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return errors.New("connection closed")
+	}
+	c.mu.RUnlock()
+
+	c.network.mu.RLock()
+	defer c.network.mu.RUnlock()
+
+	recvCh, exists := c.network.listeners[msg.To]
+	if !exists {
+		return fmt.Errorf("destination address not found: %+v", msg.To)
+	}
+
+	select {
+	case recvCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("message queue full for destination: %+v", msg.To)
+	}
+}
+
+// Recv waits for the next message on a listener connection.
+func (c *SimulatedConnection) Recv() (Message, error) {
+	c.mu.RLock()
+	if c.closed || c.recvCh == nil {
+		c.mu.RUnlock()
+		return Message{}, errors.New("connection is not listening")
+	}
+	recvCh := c.recvCh
+	c.mu.RUnlock()
+
+	msg, ok := <-recvCh
+	if !ok {
+		return Message{}, errors.New("connection closed")
+	}
+
+	return msg, nil
+}
+
+// Close closes the connection. Listener connections are removed from the network.
+func (c *SimulatedConnection) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+
+	c.closed = true
+	recvCh := c.recvCh
+	c.recvCh = nil
+	c.mu.Unlock()
+
+	if recvCh == nil {
+		return nil
+	}
+
+	c.network.mu.Lock()
+	defer c.network.mu.Unlock()
+
+	if currentCh, exists := c.network.listeners[c.addr]; exists && currentCh == recvCh {
+		delete(c.network.listeners, c.addr)
+		close(recvCh)
 	}
 
 	return nil

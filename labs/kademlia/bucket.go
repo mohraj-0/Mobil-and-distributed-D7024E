@@ -57,3 +57,22 @@ func (bucket *bucket) GetContactAndCalcDistance(target *KademliaID) []Contact {
 func (bucket *bucket) Len() int {
 	return bucket.list.Len()
 }
+
+// Contacts returns the bucket contents without recalculating distance.
+func (bucket *bucket) Contacts() []Contact {
+	contacts := make([]Contact, 0, bucket.list.Len())
+	for elt := bucket.list.Front(); elt != nil; elt = elt.Next() {
+		contacts = append(contacts, elt.Value.(Contact))
+	}
+	return contacts
+}
+
+func (bucket *bucket) hasContact(contact Contact) bool {
+	for e := bucket.list.Front(); e != nil; e = e.Next() {
+		nodeID := e.Value.(Contact).ID
+		if contact.ID.Equals(nodeID) {
+			return true
+		}
+	}
+	return false
+}
