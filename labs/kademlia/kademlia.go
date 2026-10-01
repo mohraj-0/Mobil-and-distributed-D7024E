@@ -1,415 +1,68 @@
 package kademlia
 
-import (
-	"crypto/sha256"
-	"fmt"
-)
+import "fmt"
 
-const lookupContactCount = 10
+// bestämmer vad noder ska göra (när de tar emot meddelanden)
 
-// Kademlia representerar en lokal nods Kademlia-logik.
-//
-// RoutingTable innehåller de kontakter noden känner till.
-//
-// Network kan vara:
-// - UDPNode för riktig nätverkskommunikation
-// - SimulatedNode för tester och stora simulerade nätverk
-//
-// ContactLookup används i den förenklade lookup-algoritmen
-// med fake routing tables och alpha = 1.
 type Kademlia struct {
+	// spara nodens routing table
 	RoutingTable *RoutingTable
-	Network      Node
-
-	ContactLookup func(
-		contact Contact,
-		target *KademliaID,
-		count int,
-	) []Contact
 }
 
-// LookupContact hittar kontakter vars node-ID ligger nära target.ID.
-//
-// Lookupen använder alpha = 1:
-// endast en kontakt frågas åt gången.
-func (kademlia *Kademlia) LookupContact(target *Contact) []Contact {
+// LookupContact letar efter noder som ligger nära target nodens ID
+func (kademlia *Kademlia) LookupContact(target *Contact) {
+	// Kontrollerar att routing table finns
 	if kademlia.RoutingTable == nil {
 		fmt.Println("Routing table is not initialized")
-		return nil
+		return
 	}
 
+	// Kontrollerar att target finns
 	if target == nil || target.ID == nil {
 		fmt.Println("Target is invalid")
-		return nil
+		return
 	}
 
-	contacts := kademlia.lookupContactSequential(
-		target.ID,
-		lookupContactCount,
-	)
+	// Letar efter de 10 närmaste noderna till target ID
+	contacts := kademlia.RoutingTable.FindClosestContacts(target.ID, 10)
 
+	// Skriver ut de noder som hittades
 	for _, contact := range contacts {
 		fmt.Println("Found contact:", contact.String())
 	}
-
-	return contacts
 }
 
-// lookupContactSequential implementerar den förenklade
-// Kademlia lookup-algoritmen.
-//
-// Den börjar med kontakter från den lokala routingtabellen.
-// Därefter frågar den en kontakt i taget efter närmare noder.
-func (kademlia *Kademlia) lookupContactSequential(
-	target *KademliaID,
-	count int,
-) []Contact {
-
-	if count <= 0 {
-		return nil
-	}
-
-	candidates := make([]Contact, 0, count)
-
-	// seen används för att undvika dubbletter.
-	seen := make(map[string]bool)
-
-	// queried håller reda på vilka noder som redan har frågats.
-	queried := make(map[string]bool)
-
-	// addContacts lägger till nya kontakter.
-	addContacts := func(contacts []Contact) {
-		for _, contact := range contacts {
-
-			if contact.ID == nil {
-				continue
-			}
-
-			key := contact.ID.String()
-
-			if seen[key] {
-				continue
-			}
-
-			// Räkna ut XOR-avståndet till target.
-			contact.CalcDistance(target)
-
-			seen[key] = true
-
-			candidates = append(
-				candidates,
-				contact,
-			)
-		}
-	}
-
-	// Börja med vår egen routing table.
-	initialContacts :=
-		kademlia.RoutingTable.FindClosestContacts(
-			target,
-			count,
-		)
-
-	addContacts(initialContacts)
-
-	sortContactsByDistance(candidates)
-
-	candidates =
-		firstContacts(
-			candidates,
-			count,
-		)
-
-	// Alpha = 1.
-	//
-	// Vi frågar endast en kontakt i taget.
-	for {
-
-		nextIndex :=
-			firstUnqueriedContact(
-				candidates,
-				queried,
-			)
-
-		if nextIndex == -1 {
-			break
-		}
-
-		if kademlia.ContactLookup == nil {
-			break
-		}
-
-		next := candidates[nextIndex]
-
-		queried[next.ID.String()] = true
-
-		seenBeforeQuery := len(seen)
-
-		// Fråga den valda noden efter kontakter
-		// som ligger närmare target.
-		newContacts :=
-			kademlia.ContactLookup(
-				next,
-				target,
-				count,
-			)
-
-		addContacts(newContacts)
-
-		sortContactsByDistance(candidates)
-
-		candidates =
-			firstContacts(
-				candidates,
-				count,
-			)
-
-		// Om lookupen inte hittade några nya kontakter
-		// och inga o-frågade kandidater finns kvar är vi färdiga.
-		if len(seen) == seenBeforeQuery &&
-			firstUnqueriedContact(
-				candidates,
-				queried,
-			) == -1 {
-
-			break
-		}
-	}
-
-	return candidates
-}
-
-// sortContactsByDistance sorterar kontakterna
-// efter XOR-avståndet till target.
-//
-// CalcDistance måste redan ha körts.
-func sortContactsByDistance(contacts []Contact) {
-	candidates := ContactCandidates{
-		contacts: contacts,
-	}
-
-	candidates.Sort()
-}
-
-// firstContacts returnerar högst count kontakter.
-func firstContacts(
-	contacts []Contact,
-	count int,
-) []Contact {
-
-	if count <= 0 {
-		return nil
-	}
-
-	if len(contacts) <= count {
-		return contacts
-	}
-
-	return contacts[:count]
-}
-
-// firstUnqueriedContact hittar den första kontakten
-// som ännu inte har blivit frågad.
-func firstUnqueriedContact(
-	contacts []Contact,
-	queried map[string]bool,
-) int {
-
-	for i, contact := range contacts {
-
-		if contact.ID == nil {
-			continue
-		}
-
-		if !queried[contact.ID.String()] {
-			return i
-		}
-	}
-
-	return -1
-}
-
-// NewFakeContactLookup skapar ett förenklat nätverk
-// baserat på flera routing tables.
-//
-// Detta används för att testa lookup-algoritmen
-// utan riktig UDP.
-//
-// tables:
-// node-ID -> nodens routing table
-func NewFakeContactLookup(
-	tables map[string]*RoutingTable,
-) func(
-	Contact,
-	*KademliaID,
-	int,
-) []Contact {
-
-	return func(
-		contact Contact,
-		target *KademliaID,
-		count int,
-	) []Contact {
-
-		if contact.ID == nil {
-			return nil
-		}
-
-		table :=
-			tables[contact.ID.String()]
-
-		if table == nil {
-			return nil
-		}
-
-		return table.FindClosestContacts(
-			target,
-			count,
-		)
-	}
-}
-
-// LookupData söker efter data med hjälp av en hash/key.
-//
-// Först hittar vi den kontakt som ligger närmast key:n.
-// Därefter skickar vi FIND_DATA via Network.
+// LookupData letar efter data som hör till en viss hash
 func (kademlia *Kademlia) LookupData(hash string) {
+	// Kontrollerar att hash inte är tom
 	if hash == "" {
 		fmt.Println("Hash is empty")
 		return
 	}
 
-	if kademlia.Network == nil {
-		fmt.Println("Network is not initialized")
-		return
-	}
+	// Skickar en fråga till nätverket efter data med den här hashen
+	network := Network{}
+	network.SendFindDataMessage(hash)
 
-	if kademlia.RoutingTable == nil {
-		fmt.Println("Routing table is not initialized")
-		return
-	}
+	// Visar vilken hash vi söker efter
+	fmt.Println("Looking for data with hash:", hash)
 
-	target := NewKademliaID(hash)
-
-	if target == nil {
-		fmt.Println("Invalid hash")
-		return
-	}
-
-	// Första versionen använder den närmaste
-	// kontakten från routing table.
-	//
-	// Senare kan detta kopplas till full LookupContact.
-	contacts :=
-		kademlia.RoutingTable.FindClosestContacts(
-			target,
-			1,
-		)
-
-	if len(contacts) == 0 {
-		fmt.Println("No contact found")
-		return
-	}
-
-	contact := contacts[0]
-
-	message :=
-		[]byte(
-			"FIND_DATA " +
-				hash,
-		)
-
-	err :=
-		kademlia.Network.SendData(
-			contact.Address,
-			message,
-		)
-
-	if err != nil {
-		fmt.Println(
-			"Could not send FIND_DATA:",
-			err,
-		)
-		return
-	}
-
-	fmt.Println(
-		"Looking for data with hash:",
-		hash,
-	)
 }
 
-// Store lagrar data i Kademlia.
-//
-// En SHA-256 hash skapas från datan.
-// Hashen används som Kademlia-key.
-//
-// Därefter hittar vi noden som ligger närmast key:n
-// och skickar ett STORE-meddelande dit.
+// skickar data till nätverket för att lagras
 func (kademlia *Kademlia) Store(data []byte) {
+	// Kontrollerar att data inte är tom
 	if len(data) == 0 {
 		fmt.Println("Data is empty")
 		return
 	}
 
-	if kademlia.Network == nil {
-		fmt.Println("Network is not initialized")
-		return
-	}
+	// Skapar ett Network objekt
+	network := Network{}
 
-	if kademlia.RoutingTable == nil {
-		fmt.Println("Routing table is not initialized")
-		return
-	}
+	// Skickar datan för lagring
+	network.SendStoreMessage(data)
 
-	// Skapa 256-bitars key från datan.
-	hash := sha256.Sum256(data)
-
-	key := KademliaID(hash)
-
-	// Hitta kontakten som ligger närmast key:n.
-	contacts :=
-		kademlia.RoutingTable.FindClosestContacts(
-			&key,
-			1,
-		)
-
-	if len(contacts) == 0 {
-		fmt.Println(
-			"No contact found for storage",
-		)
-		return
-	}
-
-	contact := contacts[0]
-
-	// STORE <key> <data>
-	message :=
-		append(
-			[]byte(
-				"STORE "+
-					key.String()+
-					" ",
-			),
-			data...,
-		)
-
-	err :=
-		kademlia.Network.SendData(
-			contact.Address,
-			message,
-		)
-
-	if err != nil {
-		fmt.Println(
-			"Could not send STORE:",
-			err,
-		)
-		return
-	}
-
-	fmt.Println(
-		"Data sent for storage with key:",
-		key.String(),
-	)
+	// Visar att datan skickades
+	fmt.Println("Data sent for storage")
 }
