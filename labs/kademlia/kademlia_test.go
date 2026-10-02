@@ -1,71 +1,600 @@
-package kademlia_test
+package kademlia
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"testing"
-
-	"d7024e/kademlia"
+	"time"
 )
 
-func TestLookupContactWithoutRoutingTable(t *testing.T) {
-	t.Log("testing that LookupContact handles a missing routing table without crashing")
+type callbackNode struct {
+	send           func(address string, data []byte) error
+	receiveMessage Message
+	receiveErr     error
+	receivedOnce   bool
+}
 
-	node := &kademlia.Kademlia{}
-	target := kademlia.NewContact(kademliaTestID("ff"), "127.0.0.1:8000")
+func testNode(
+	idPrefix string,
+	address string,
+	network Node,
+) *Kademlia {
+	me := NewContact(
+		testID(idPrefix),
+		address,
+	)
 
-	if contacts := node.LookupContact(&target); contacts != nil {
-		t.Fatalf("LookupContact without routing table returned %d contacts, want nil", len(contacts))
+	return &Kademlia{
+		RoutingTable: NewRoutingTable(me),
+		Network:      network,
+		Alpha:        3,
+		K:            10,
+		RPCTimeout:   50 * time.Millisecond,
 	}
 }
 
-func TestLookupContactUsesLocalRoutingTable(t *testing.T) {
-	t.Log("testing that LookupContact returns closest contacts from the local routing table")
-
-	me := kademlia.NewContact(kademliaTestID("ff"), "127.0.0.1:8000")
-	target := kademlia.NewContact(kademliaTestID("11"), "127.0.0.1:8001")
-	node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(me)}
-
-	node.RoutingTable.AddContact(target)
-
-	contacts := node.LookupContact(&target)
-	if len(contacts) != 1 {
-		t.Fatalf("LookupContact returned %d contacts, want 1", len(contacts))
+func (n *callbackNode) Listen(address string) error { return nil }
+func (n *callbackNode) Close() error                { return nil }
+func (n *callbackNode) Receive() (Message, error) {
+	if !n.receivedOnce {
+		n.receivedOnce = true
+		if n.receiveErr == nil {
+			return n.receiveMessage, nil
+		}
 	}
-	if !contacts[0].ID.Equals(target.ID) {
-		t.Fatalf("closest contact = %s, want target %s", contacts[0].ID, target.ID)
+	if n.receiveErr != nil {
+		return Message{}, n.receiveErr
 	}
-
-	t.Logf("example lookup result: target=%s closest=%s", target.ID, contacts[0].ID)
+	return Message{}, errors.New("stop")
+}
+func (n *callbackNode) SendData(address string, data []byte) error {
+	if n.send != nil {
+		return n.send(address, data)
+	}
+	return nil
 }
 
-func TestLookupContactSequentialAlphaOneFindsCloserContacts(t *testing.T) {
-	t.Log("testing iterative lookup with alpha=1 over fake routing tables")
+func testID(prefix string) *KademliaID {
+	return NewKademliaID(prefix + "00000000000000000000000000000000000000000000000000000000000000")
+}
 
-	me := kademlia.NewContact(kademliaTestID("ff"), "127.0.0.1:8000")
-	firstHop := kademlia.NewContact(kademliaTestID("80"), "127.0.0.1:8001")
-	secondHop := kademlia.NewContact(kademliaTestID("40"), "127.0.0.1:8002")
-	target := kademlia.NewContact(kademliaTestID("00"), "127.0.0.1:8003")
+func newTestNode(prefix, address string, network Node) *Kademlia {
+	me := NewContact(testID(prefix), address)
+	return &Kademlia{
+		RoutingTable: NewRoutingTable(me),
+		Network:      network,
+		Alpha:        3,
+		K:            10,
+		RPCTimeout:   50 * time.Millisecond,
+	}
+}
 
-	node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(me)}
-	node.RoutingTable.AddContact(firstHop)
-	t.Logf("starting table only knows first hop: %s", firstHop.ID)
+func TestDefaultsAndRequestID(t *testing.T) {
+	node := &Kademlia{}
+	if node.alpha() != 3 {
+		t.Fatalf("default alpha = %d, want 3", node.alpha())
+	}
+	if node.kValue() != 10 {
+		t.Fatalf("default k = %d, want 10", node.kValue())
+	}
+	if node.rpcTimeout() != 2*time.Second {
+		t.Fatalf("default timeout = %v, want 2s", node.rpcTimeout())
+	}
 
-	firstHopTable := kademlia.NewRoutingTable(firstHop)
-	firstHopTable.AddContact(secondHop)
-	t.Logf("first queried node returns a closer second hop: %s", secondHop.ID)
+	node.Alpha = 5
+	node.K = 7
+	node.RPCTimeout = 25 * time.Millisecond
+	if node.alpha() != 5 || node.kValue() != 7 || node.rpcTimeout() != 25*time.Millisecond {
+		t.Fatal("custom parameters were not returned")
+	}
 
-	secondHopTable := kademlia.NewRoutingTable(secondHop)
-	secondHopTable.AddContact(target)
-	t.Logf("second queried node returns the target contact: %s", target.ID)
+	first, err := randomRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := randomRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 64 {
+		t.Fatalf("request ID length = %d, want 64", len(first))
+	}
+	if first == second {
+		t.Fatal("request IDs should be different")
+	}
+}
 
-	queried := make([]string, 0, 2)
-	fakeLookup := kademlia.NewFakeContactLookup(map[string]*kademlia.RoutingTable{
-		firstHop.ID.String():  firstHopTable,
-		secondHop.ID.String(): secondHopTable,
+func TestEnsureMapsAndDataStore(t *testing.T) {
+	node := &Kademlia{}
+	node.ensureFindNodeResponses()
+	node.ensureFindValueResponses()
+	node.ensureStoreResponses()
+	node.ensureDataStore()
+
+	if node.findNodeResponses == nil || node.findValueResponses == nil || node.storeResponses == nil || node.DataStore == nil {
+		t.Fatal("one or more maps were not initialized")
+	}
+}
+
+func TestRoutingHelpersAndWireConversion(t *testing.T) {
+	me := NewContact(testID("ff"), "node-me")
+	node := &Kademlia{RoutingTable: NewRoutingTable(me)}
+	contact := NewContact(testID("11"), "node-11")
+	node.addContact(contact)
+
+	closest := node.closestContacts(contact.ID, 1)
+	if len(closest) != 1 || !closest[0].ID.Equals(contact.ID) {
+		t.Fatal("closestContacts returned wrong result")
+	}
+
+	invalid := Contact{ID: nil, Address: "invalid"}
+	wire := contactsToWire([]Contact{contact, invalid})
+	if len(wire) != 1 {
+		t.Fatalf("contactsToWire returned %d contacts, want 1", len(wire))
+	}
+
+	back := wireToContacts([]wireContact{
+		wire[0],
+		{ID: "invalid", Address: "bad"},
+		{ID: contact.ID.String(), Address: ""},
 	})
-	node.ContactLookup = func(contact kademlia.Contact, targetID *kademlia.KademliaID, count int) []kademlia.Contact {
-		queried = append(queried, contact.ID.String())
-		t.Logf("alpha=1 query: asking %s for contacts close to %s", contact.ID, targetID)
-		return fakeLookup(contact, targetID, count)
+	if len(back) != 1 || !back[0].ID.Equals(contact.ID) {
+		t.Fatal("wireToContacts returned wrong result")
+	}
+
+	if node.me().Address != "node-me" {
+		t.Fatal("me() returned wrong contact")
+	}
+}
+
+func TestLookupContactValidation(t *testing.T) {
+	target := NewContact(testID("11"), "target")
+	if contacts := (&Kademlia{}).LookupContact(&target); contacts != nil {
+		t.Fatal("LookupContact without routing table should return nil")
+	}
+
+	me := NewContact(testID("ff"), "me")
+	node := &Kademlia{RoutingTable: NewRoutingTable(me)}
+	if contacts := node.LookupContact(nil); contacts != nil {
+		t.Fatal("nil target should return nil")
+	}
+	if contacts := node.LookupContact(&Contact{}); contacts != nil {
+		t.Fatal("nil target ID should return nil")
+	}
+}
+
+func TestHandleFindNodeRPC(t *testing.T) {
+	var sent rpcMessage
+	network := &callbackNode{}
+	node := newTestNode("ff", "node-a", network)
+	known := NewContact(testID("22"), "node-known")
+	node.RoutingTable.AddContact(known)
+
+	network.send = func(address string, data []byte) error {
+		if address != "node-b" {
+			t.Fatalf("reply sent to %q, want node-b", address)
+		}
+		return json.Unmarshal(data, &sent)
+	}
+
+	node.handleFindNodeRPC(rpcMessage{
+		Type: rpcFindNode, RequestID: "request-1",
+		SenderID: testID("11").String(), SenderAddress: "node-b",
+		TargetID: known.ID.String(),
+	})
+
+	if sent.Type != rpcFindNodeReply || sent.RequestID != "request-1" || len(sent.Contacts) == 0 {
+		t.Fatal("invalid FIND_NODE reply")
+	}
+}
+
+func TestHandleFindNodeReplyRPC(t *testing.T) {
+	node := newTestNode("ff", "node-a", &callbackNode{})
+	ch := make(chan []Contact, 1)
+	node.findNodeResponses = map[string]chan []Contact{"request-1": ch}
+	contact := NewContact(testID("22"), "node-c")
+
+	node.handleFindNodeReplyRPC(rpcMessage{
+		Type: rpcFindNodeReply, RequestID: "request-1",
+		SenderID: testID("11").String(), SenderAddress: "node-b",
+		Contacts: contactsToWire([]Contact{contact}),
+	})
+
+	select {
+	case contacts := <-ch:
+		if len(contacts) != 1 || !contacts[0].ID.Equals(contact.ID) {
+			t.Fatal("wrong contacts")
+		}
+	default:
+		t.Fatal("reply was not delivered")
+	}
+
+	node.handleFindNodeReplyRPC(rpcMessage{Type: rpcFindNodeReply, RequestID: "unknown"})
+}
+
+func TestSendFindNodeRPCSuccessAndTimeout(t *testing.T) {
+	remote := NewContact(testID("11"), "node-b")
+	target := testID("00")
+	found := NewContact(testID("01"), "node-c")
+
+	var node *Kademlia
+	network := &callbackNode{}
+	node = newTestNode("ff", "node-a", network)
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		node.handleFindNodeReplyRPC(rpcMessage{
+			Type: rpcFindNodeReply, RequestID: request.RequestID,
+			SenderID: remote.ID.String(), SenderAddress: remote.Address,
+			Contacts: contactsToWire([]Contact{found}),
+		})
+		return nil
+	}
+
+	contacts, err := node.sendFindNodeRPC(remote, target)
+	if err != nil {
+		t.Fatalf("sendFindNodeRPC failed: %v", err)
+	}
+	if len(contacts) != 1 || !contacts[0].ID.Equals(found.ID) {
+		t.Fatal("wrong FIND_NODE result")
+	}
+
+	network.send = func(address string, data []byte) error { return nil }
+	node.RPCTimeout = time.Millisecond
+	if _, err := node.sendFindNodeRPC(remote, target); err == nil {
+		t.Fatal("expected timeout")
+	}
+}
+
+func TestFindValueRPCAndLookupData(t *testing.T) {
+	value := []byte("hello-kademlia")
+	sum := sha256.Sum256(value)
+	key := KademliaID(sum)
+	remote := NewContact(testID("11"), "node-b")
+
+	var node *Kademlia
+	network := &callbackNode{}
+	node = newTestNode("ff", "node-a", network)
+	node.RoutingTable.AddContact(remote)
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		switch request.Type {
+		case rpcFindValue:
+			node.handleFindValueReplyRPC(rpcMessage{
+				Type: rpcFindValueReply, RequestID: request.RequestID,
+				SenderID: remote.ID.String(), SenderAddress: remote.Address,
+				Key: request.Key, Found: true, Value: value,
+			})
+		case rpcFindNode:
+			node.handleFindNodeReplyRPC(rpcMessage{
+				Type: rpcFindNodeReply, RequestID: request.RequestID,
+				SenderID: remote.ID.String(), SenderAddress: remote.Address,
+			})
+		}
+		return nil
+	}
+
+	got, err := node.LookupData(key.String())
+	if err != nil {
+		t.Fatalf("LookupData failed: %v", err)
+	}
+	if string(got) != string(value) {
+		t.Fatal("LookupData returned wrong value")
+	}
+
+	node.DataStore = map[string][]byte{key.String(): append([]byte(nil), value...)}
+	got, err = node.LookupData(key.String())
+	if err != nil || string(got) != string(value) {
+		t.Fatal("local LookupData failed")
+	}
+}
+
+func TestHandleFindValueRPCFoundAndNotFound(t *testing.T) {
+	value := []byte("stored-value")
+	sum := sha256.Sum256(value)
+	key := KademliaID(sum)
+	var replies []rpcMessage
+
+	network := &callbackNode{}
+	node := newTestNode("ff", "node-a", network)
+	node.DataStore = map[string][]byte{key.String(): value}
+	network.send = func(address string, data []byte) error {
+		var reply rpcMessage
+		if err := json.Unmarshal(data, &reply); err != nil {
+			return err
+		}
+		replies = append(replies, reply)
+		return nil
+	}
+
+	req := rpcMessage{
+		Type: rpcFindValue, RequestID: "fv-1",
+		SenderID: testID("11").String(), SenderAddress: "node-b", Key: key.String(),
+	}
+	node.handleFindValueRPC(req)
+	if len(replies) != 1 || !replies[0].Found || string(replies[0].Value) != string(value) {
+		t.Fatal("existing value was not returned")
+	}
+
+	req.RequestID = "fv-2"
+	req.Key = testID("33").String()
+	node.handleFindValueRPC(req)
+	if len(replies) != 2 || replies[1].Found {
+		t.Fatal("missing value should return Found=false")
+	}
+}
+
+func TestStoreLocalAndHandleStoreRPC(t *testing.T) {
+	localNetwork := &callbackNode{}
+	node := testNode("ff", "node-a", localNetwork)
+
+	// Inga andra kontakter => Store lagrar lokalt.
+	value := []byte("local-data")
+
+	key, err := node.Store(value)
+	if err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+
+	if string(node.DataStore[key]) != string(value) {
+		t.Fatal("Store did not save the local value")
+	}
+
+	// Testa inkommande STORE med korrekt hash.
+	remoteValue := []byte("remote-data")
+
+	sum := sha256.Sum256(remoteValue)
+	remoteKey := KademliaID(sum)
+
+	var reply rpcMessage
+
+	localNetwork.send = func(address string, data []byte) error {
+		return json.Unmarshal(data, &reply)
+	}
+
+	node.handleStoreRPC(rpcMessage{
+		Type:          rpcStore,
+		RequestID:     "store-1",
+		SenderID:      testID("11").String(),
+		SenderAddress: "node-b",
+		Key:           remoteKey.String(),
+		Value:         remoteValue,
+	})
+
+	if !reply.Stored {
+		t.Fatal("valid STORE should be accepted")
+	}
+
+	if string(node.DataStore[remoteKey.String()]) != string(remoteValue) {
+		t.Fatal("valid STORE value was not saved")
+	}
+
+	// Nollställ svaret innan nästa test.
+	reply = rpcMessage{}
+
+	// Testa STORE med fel hash.
+	node.handleStoreRPC(rpcMessage{
+		Type:          rpcStore,
+		RequestID:     "store-2",
+		SenderID:      testID("11").String(),
+		SenderAddress: "node-b",
+		Key:           testID("44").String(),
+		Value:         []byte("wrong-hash"),
+	})
+
+	if reply.Stored {
+		t.Fatal("STORE with wrong hash should be rejected")
+	}
+}
+
+func TestSendStoreRPCSuccessRejectedAndTimeout(t *testing.T) {
+	value := []byte("store-value")
+	sum := sha256.Sum256(value)
+	key := KademliaID(sum)
+	remote := NewContact(testID("11"), "node-b")
+
+	var node *Kademlia
+	network := &callbackNode{}
+	node = newTestNode("ff", "node-a", network)
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		node.handleStoreReplyRPC(rpcMessage{
+			Type: rpcStoreReply, RequestID: request.RequestID,
+			SenderID: remote.ID.String(), SenderAddress: remote.Address, Stored: true,
+		})
+		return nil
+	}
+	if err := node.sendStoreRPC(remote, &key, value); err != nil {
+		t.Fatalf("sendStoreRPC failed: %v", err)
+	}
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		node.handleStoreReplyRPC(rpcMessage{
+			Type: rpcStoreReply, RequestID: request.RequestID,
+			SenderID: remote.ID.String(), SenderAddress: remote.Address, Stored: false,
+		})
+		return nil
+	}
+	if err := node.sendStoreRPC(remote, &key, value); err == nil {
+		t.Fatal("rejected STORE should fail")
+	}
+
+	network.send = func(address string, data []byte) error { return nil }
+	node.RPCTimeout = time.Millisecond
+	if err := node.sendStoreRPC(remote, &key, value); err == nil {
+		t.Fatal("STORE should time out")
+	}
+}
+
+func TestLookupDataValidationAndNotFound(t *testing.T) {
+	if _, err := (&Kademlia{}).LookupData(""); err == nil {
+		t.Fatal("missing routing table should fail")
+	}
+
+	me := NewContact(testID("ff"), "node-a")
+	node := &Kademlia{RoutingTable: NewRoutingTable(me)}
+	if _, err := node.LookupData(testID("11").String()); err == nil {
+		t.Fatal("missing network should fail")
+	}
+
+	node.Network = &callbackNode{}
+	if _, err := node.LookupData("invalid"); err == nil {
+		t.Fatal("invalid hash should fail")
+	}
+	if _, err := node.LookupData(testID("22").String()); err == nil {
+		t.Fatal("missing value should return error")
+	}
+}
+
+func TestStoreValidation(t *testing.T) {
+	node := &Kademlia{}
+	if _, err := node.Store([]byte{}); err == nil {
+		t.Fatal("empty Store should fail")
+	}
+	if _, err := node.Store([]byte("x")); err == nil {
+		t.Fatal("missing routing table should fail")
+	}
+
+	me := NewContact(testID("ff"), "node-a")
+	node.RoutingTable = NewRoutingTable(me)
+	if _, err := node.Store([]byte("x")); err == nil {
+		t.Fatal("missing network should fail")
+	}
+}
+
+func TestRefreshAndJoinValidation(t *testing.T) {
+	node := &Kademlia{}
+	node.Refresh(0)
+
+	bootstrap := NewContact(testID("11"), "node-b")
+	if err := node.Join(bootstrap); err == nil {
+		t.Fatal("Join without routing table should fail")
+	}
+
+	me := NewContact(testID("ff"), "node-a")
+	node.RoutingTable = NewRoutingTable(me)
+	if err := node.Join(bootstrap); err == nil {
+		t.Fatal("Join without network should fail")
+	}
+
+	node.Network = &callbackNode{}
+	if err := node.Join(Contact{}); err == nil {
+		t.Fatal("invalid bootstrap should fail")
+	}
+
+	node.Refresh(-1)
+	node.Refresh(IDLength * 8)
+	node.Refresh(0)
+}
+
+func TestJoinSuccess(t *testing.T) {
+	bootstrap := NewContact(testID("11"), "node-b")
+	var node *Kademlia
+	network := &callbackNode{}
+	node = newTestNode("ff", "node-a", network)
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		if request.Type == rpcFindNode {
+			node.handleFindNodeReplyRPC(rpcMessage{
+				Type: rpcFindNodeReply, RequestID: request.RequestID,
+				SenderID: bootstrap.ID.String(), SenderAddress: bootstrap.Address,
+			})
+		}
+		return nil
+	}
+
+	if err := node.Join(bootstrap); err != nil {
+		t.Fatalf("Join failed: %v", err)
+	}
+	closest := node.RoutingTable.FindClosestContacts(bootstrap.ID, 1)
+	if len(closest) == 0 {
+		t.Fatal("bootstrap was not added")
+	}
+}
+
+func TestHandleRPCMessageAndListenForRPC(t *testing.T) {
+	me := NewContact(testID("ff"), "node-a")
+	req := rpcMessage{
+		Type: rpcFindNode, RequestID: "listen-1",
+		SenderID: testID("11").String(), SenderAddress: "node-b", TargetID: me.ID.String(),
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	network := &callbackNode{receiveMessage: Message{From: "node-b", Data: data}}
+	node := &Kademlia{RoutingTable: NewRoutingTable(me), Network: network, RPCTimeout: 10 * time.Millisecond}
+
+	done := make(chan struct{})
+	go func() { node.ListenForRPC(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ListenForRPC did not stop")
+	}
+
+	node.handleRPCMessage(Message{Data: []byte("{")})
+	unknown, _ := json.Marshal(rpcMessage{Type: "UNKNOWN"})
+	node.handleRPCMessage(Message{Data: unknown})
+	(&Kademlia{}).ListenForRPC()
+}
+
+func TestLookupContactParallelFindsCloserContact(t *testing.T) {
+	firstHop := NewContact(testID("80"), "node-b")
+	closer := NewContact(testID("10"), "node-c")
+	target := NewContact(testID("00"), "target")
+
+	var node *Kademlia
+	network := &callbackNode{}
+	node = newTestNode("ff", "node-a", network)
+	node.RoutingTable.AddContact(firstHop)
+
+	network.send = func(address string, data []byte) error {
+		var request rpcMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+
+		var contacts []Contact
+		sender := firstHop
+		switch address {
+		case firstHop.Address:
+			contacts = []Contact{closer}
+		case closer.Address:
+			contacts = []Contact{target}
+			sender = closer
+		case target.Address:
+			sender = target
+		}
+
+		node.handleFindNodeReplyRPC(rpcMessage{
+			Type: rpcFindNodeReply, RequestID: request.RequestID,
+			SenderID: sender.ID.String(), SenderAddress: sender.Address,
+			Contacts: contactsToWire(contacts),
+		})
+		return nil
 	}
 
 	contacts := node.LookupContact(&target)
@@ -73,85 +602,6 @@ func TestLookupContactSequentialAlphaOneFindsCloserContacts(t *testing.T) {
 		t.Fatal("LookupContact returned no contacts")
 	}
 	if !contacts[0].ID.Equals(target.ID) {
-		t.Fatalf("closest contact = %s, want target %s", contacts[0].ID, target.ID)
+		t.Fatalf("closest = %s, want %s", contacts[0].ID, target.ID)
 	}
-	if len(queried) != 3 {
-		t.Fatalf("queried %d contacts, want 3 sequential alpha=1 queries", len(queried))
-	}
-	if queried[0] != firstHop.ID.String() || queried[1] != secondHop.ID.String() || queried[2] != target.ID.String() {
-		t.Fatalf("query order = %v, want first hop, second hop, target", queried)
-	}
-
-	t.Logf("example final closest contact: target=%s closest=%s", target.ID, contacts[0].ID)
-}
-
-func TestJoinNetworkLooksUpSelfAndRefreshesBuckets(t *testing.T) {
-	t.Log("testing full join: bootstrap insert, self lookup, and bucket refresh")
-
-	me := kademlia.NewContact(kademliaTestID("00"), "127.0.0.1:8000")
-	bootstrap := kademlia.NewContact(kademliaTestID("80"), "127.0.0.1:8001")
-	peer := kademlia.NewContact(kademliaTestID("40"), "127.0.0.1:8002")
-
-	node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(me)}
-	bootstrapTable := kademlia.NewRoutingTable(bootstrap)
-	bootstrapTable.AddContact(peer)
-
-	fakeLookup := kademlia.NewFakeContactLookup(map[string]*kademlia.RoutingTable{
-		bootstrap.ID.String(): bootstrapTable,
-	})
-
-	queriedTargets := make([]string, 0)
-	node.ContactLookup = func(contact kademlia.Contact, targetID *kademlia.KademliaID, count int) []kademlia.Contact {
-		queriedTargets = append(queriedTargets, targetID.String())
-		t.Logf("join query: asking %s for contacts close to %s", contact.ID, targetID)
-		return fakeLookup(contact, targetID, count)
-	}
-
-	contacts := node.JoinNetwork(bootstrap)
-	if len(contacts) < 2 {
-		t.Fatalf("JoinNetwork returned %d contacts, want at least bootstrap and peer", len(contacts))
-	}
-
-	closestToPeer := node.RoutingTable.FindClosestContacts(peer.ID, 1)
-	if len(closestToPeer) != 1 || !closestToPeer[0].ID.Equals(peer.ID) {
-		t.Fatalf("join did not add discovered peer to routing table")
-	}
-
-	if len(queriedTargets) == 0 || queriedTargets[0] != me.ID.String() {
-		t.Fatalf("first join query target = %v, want own node ID %s", queriedTargets, me.ID)
-	}
-
-	for _, bucketIndex := range node.RoutingTable.NonEmptyBucketIndices() {
-		refreshTarget := node.RoutingTable.RefreshIDForBucket(bucketIndex).String()
-		if !containsString(queriedTargets, refreshTarget) {
-			t.Fatalf("bucket %d was not refreshed; query targets were %v", bucketIndex, queriedTargets)
-		}
-	}
-}
-
-func TestLookupDataEmptyHash(t *testing.T) {
-	t.Log("testing that LookupData handles an empty hash without sending a message")
-
-	node := &kademlia.Kademlia{}
-	node.LookupData("")
-}
-
-func TestStoreEmptyData(t *testing.T) {
-	t.Log("testing that Store handles empty data without sending a message")
-
-	node := &kademlia.Kademlia{}
-	node.Store([]byte{})
-}
-
-func kademliaTestID(prefix string) *kademlia.KademliaID {
-	return kademlia.NewKademliaID(prefix + "00000000000000000000000000000000000000000000000000000000000000")
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
