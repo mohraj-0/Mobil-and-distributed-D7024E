@@ -753,6 +753,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 				if calculatedKey.String() == target.String() {
 					return append([]byte(nil), response.result.Value...), nil
 				}
+				fmt.Println("Corrupted value received: hash does not match key")
 				continue
 			}
 
