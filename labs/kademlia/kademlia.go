@@ -14,6 +14,7 @@ const lookupContactCount = 10
 const defaultAlpha = 3
 const defaultK = 10
 const defaultRPCTimeout = 2 * time.Second
+const defaultReplicationPeriod = 30 * time.Second
 
 // RPC-typer
 const (
@@ -38,6 +39,9 @@ type Kademlia struct {
 
 	// Timeout för RPC.
 	RPCTimeout time.Duration
+
+	// Hur ofta lagrade värden ska replikeras.
+	ReplicationPeriod time.Duration
 
 	// Skyddar routing table när flera goroutines arbetar samtidigt.
 	routingMu sync.Mutex
@@ -111,6 +115,16 @@ func (kademlia *Kademlia) rpcTimeout() time.Duration {
 		return defaultRPCTimeout
 	}
 	return kademlia.RPCTimeout
+}
+
+// Returnerar replication period.
+// Om inget värde satts används default.
+func (kademlia *Kademlia) replicationPeriod() time.Duration {
+	if kademlia.ReplicationPeriod <= 0 {
+		return defaultReplicationPeriod
+	}
+
+	return kademlia.ReplicationPeriod
 }
 
 // Skapar ett unikt ID för varje RPC-request.
@@ -763,6 +777,61 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("value not found")
+}
+
+// ReplicateData replikerar alla lokalt lagrade värden
+// till de k närmaste noderna igen.
+func (kademlia *Kademlia) ReplicateData() {
+	kademlia.ensureDataStore()
+
+	// Kopiera värden först så att vi inte håller låset
+	// medan nätverksanrop görs.
+	kademlia.dataMu.RLock()
+
+	values := make([][]byte, 0, len(kademlia.DataStore))
+
+	for _, value := range kademlia.DataStore {
+		values = append(
+			values,
+			append([]byte(nil), value...),
+		)
+	}
+
+	kademlia.dataMu.RUnlock()
+
+	// Store gör lookup och lagrar på de k närmaste noderna.
+	for _, value := range values {
+		_, err := kademlia.Store(value)
+
+		if err != nil {
+			fmt.Println(
+				"Replication failed:",
+				err,
+			)
+		}
+	}
+}
+
+// StartReplication startar periodisk replikering.
+// Stop-kanalen används för att avsluta bakgrundsarbetet.
+func (kademlia *Kademlia) StartReplication(
+	stop <-chan struct{},
+) {
+	ticker := time.NewTicker(
+		kademlia.replicationPeriod(),
+	)
+
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			kademlia.ReplicateData()
+
+		case <-stop:
+			return
+		}
+	}
 }
 
 // Lagrar data på de k närmaste noderna.
