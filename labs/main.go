@@ -181,7 +181,7 @@ func main() {
 		flag.String(
 			"port",
 			"8000",
-			"UDP port",
+			"Network port",
 		)
 
 	httpPort :=
@@ -189,6 +189,13 @@ func main() {
 			"http",
 			"8080",
 			"HTTP port",
+		)
+
+	transport :=
+		flag.String(
+			"transport",
+			"simulated",
+			"Network transport: simulated or udp",
 		)
 
 	flag.Parse()
@@ -229,11 +236,18 @@ func main() {
 		id.String(),
 	)
 
-	// Skapa UDP-nätverket.
-	network :=
-		kademlia.NewUDPNode()
+	// Skapa vald transport.
+	var network kademlia.Node
+	switch strings.ToLower(*transport) {
+	case "simulated", "sim":
+		network = kademlia.NewSimulatedNode()
+	case "udp":
+		network = kademlia.NewUDPNode()
+	default:
+		log.Fatal("transport must be simulated or udp")
+	}
 
-	// Starta UDP-porten.
+	// Starta vald transport.
 	err =
 		network.Listen(
 			address,
@@ -241,7 +255,7 @@ func main() {
 
 	if err != nil {
 		log.Fatal(
-			"Could not start UDP:",
+			"Could not start transport:",
 			err,
 		)
 	}
