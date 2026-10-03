@@ -15,7 +15,6 @@ const defaultAlpha = 3
 const defaultK = 10
 const defaultRPCTimeout = 2 * time.Second
 const defaultReplicationPeriod = 30 * time.Second
-const defaultRPCRetries = 3
 
 // RPC-typer
 const (
@@ -37,9 +36,6 @@ type Kademlia struct {
 
 	// Antal noder som data lagras på. Default är 10.
 	K int
-
-	// Antal försök för ett RPC innan vi ger upp
-	RPCRetries int
 
 	// Timeout för RPC.
 	RPCTimeout time.Duration
@@ -119,15 +115,6 @@ func (kademlia *Kademlia) rpcTimeout() time.Duration {
 		return defaultRPCTimeout
 	}
 	return kademlia.RPCTimeout
-}
-
-// Returnerar antal försök för RPC. Default är 3
-func (kademlia *Kademlia) rpcRetries() int {
-	if kademlia.RPCRetries <= 0 {
-		return defaultRPCRetries
-	}
-
-	return kademlia.RPCRetries
 }
 
 // Returnerar replication period.
@@ -382,33 +369,16 @@ func (kademlia *Kademlia) sendFindNodeRPC(contact Contact, target *KademliaID) (
 		return nil, err
 	}
 
-	// Skickar RPC-förfrågan och försöker igen vid fel eller timeout.
-	// Samma RequestID används för alla försök så att svaret kan matchas rätt.
-	// Efter maximalt antal försök returneras det senaste felet.
-	var lastErr error
-
-	for attempt := 0; attempt < kademlia.rpcRetries(); attempt++ {
-		err = kademlia.Network.SendData(contact.Address, data)
-
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		select {
-		case contacts := <-responseChannel:
-			return contacts, nil
-
-		case <-time.After(kademlia.rpcTimeout()):
-			lastErr = fmt.Errorf("FIND_NODE timeout")
-		}
+	if err = kademlia.Network.SendData(contact.Address, data); err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf(
-		"FIND_NODE failed after %d attempts: %v",
-		kademlia.rpcRetries(),
-		lastErr,
-	)
+	select {
+	case contacts := <-responseChannel:
+		return contacts, nil
+	case <-time.After(kademlia.rpcTimeout()):
+		return nil, fmt.Errorf("FIND_NODE timeout")
+	}
 }
 
 // Hanterar FIND_VALUE.
@@ -534,34 +504,17 @@ func (kademlia *Kademlia) sendFindValueRPC(contact Contact, key *KademliaID) (fi
 	if err != nil {
 		return empty, err
 	}
-	// Skickar RPC-förfrågan och försöker igen vid fel eller timeout.
-	// Samma RequestID används för alla försök så att svaret kan matchas rätt.
-	// Efter maximalt antal försök returneras det senaste felet.
-	var lastErr error
 
-	for attempt := 0; attempt < kademlia.rpcRetries(); attempt++ {
-		err = kademlia.Network.SendData(contact.Address, data)
-
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		select {
-		case result := <-responseChannel:
-			return result, nil
-
-		case <-time.After(kademlia.rpcTimeout()):
-			lastErr = fmt.Errorf("FIND_VALUE timeout")
-		}
+	if err = kademlia.Network.SendData(contact.Address, data); err != nil {
+		return empty, err
 	}
 
-	return empty, fmt.Errorf(
-		"FIND_VALUE failed after %d attempts: %v",
-		kademlia.rpcRetries(),
-		lastErr,
-	)
-
+	select {
+	case result := <-responseChannel:
+		return result, nil
+	case <-time.After(kademlia.rpcTimeout()):
+		return empty, fmt.Errorf("FIND_VALUE timeout")
+	}
 }
 
 // Hanterar STORE och verifierar key == SHA-256(value).
@@ -666,37 +619,20 @@ func (kademlia *Kademlia) sendStoreRPC(contact Contact, key *KademliaID, value [
 	if err != nil {
 		return err
 	}
-	// Skickar RPC-förfrågan och försöker igen vid fel eller timeout.
-	// Samma RequestID används för alla försök så att svaret kan matchas rätt.
-	// Efter maximalt antal försök returneras det senaste felet.
-	var lastErr error
 
-	for attempt := 0; attempt < kademlia.rpcRetries(); attempt++ {
-		err = kademlia.Network.SendData(contact.Address, data)
-
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		select {
-		case stored := <-responseChannel:
-			if !stored {
-				return fmt.Errorf("STORE rejected")
-			}
-
-			return nil
-
-		case <-time.After(kademlia.rpcTimeout()):
-			lastErr = fmt.Errorf("STORE timeout")
-		}
+	if err = kademlia.Network.SendData(contact.Address, data); err != nil {
+		return err
 	}
 
-	return fmt.Errorf(
-		"STORE failed after %d attempts: %v",
-		kademlia.rpcRetries(),
-		lastErr,
-	)
+	select {
+	case stored := <-responseChannel:
+		if !stored {
+			return fmt.Errorf("STORE rejected")
+		}
+		return nil
+	case <-time.After(kademlia.rpcTimeout()):
+		return fmt.Errorf("STORE timeout")
+	}
 }
 
 // Hittar noder nära ett target-ID.
