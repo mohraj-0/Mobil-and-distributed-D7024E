@@ -23,9 +23,51 @@ jobs:
           cache-dependency-path: labs/go.sum
 
       - name: Run tests
-        run: go test ./...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -v ./... 2>&1 | tee go-test.log
 
       - name: Run race detector
         env:
           CGO_ENABLED: "1"
-        run: go test -race ./...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -v ./... 2>&1 | tee go-test-race.log
+
+      - name: Publish test summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Go test results"
+            echo
+            echo "### go test -v ./..."
+            echo '```text'
+            if [ -f go-test.log ]; then
+              tail -n 80 go-test.log
+            else
+              echo "go-test.log was not created"
+            fi
+            echo '```'
+            echo
+            echo "### go test -race -v ./..."
+            echo '```text'
+            if [ -f go-test-race.log ]; then
+              tail -n 80 go-test-race.log
+            else
+              echo "go-test-race.log was not created"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-logs
+          path: |
+            labs/go-test.log
+            labs/go-test-race.log
+          if-no-files-found: ignore

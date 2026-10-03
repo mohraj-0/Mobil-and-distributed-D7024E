@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o kadlab .
+RUN CGO_ENABLED=0 GOOS=linux go build -o kadlab ./cmd/simshell
 
 FROM alpine:latest
 
@@ -12,4 +12,4 @@ WORKDIR /app
 
 COPY --from=builder /app/kadlab .
 
-CMD ["./kadlab"]
+CMD ["./kadlab", "serve"]
