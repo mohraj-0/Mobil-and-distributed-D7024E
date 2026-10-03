@@ -1,0 +1,76 @@
+Network and shell changes
+=========================
+
+Files changed:
+- labs/kademlia/network.go
+- labs/kademlia/kademliaid.go
+- labs/main.go
+- labs/docker-compose.yml
+
+Summary
+-------
+The Kademlia networking code now supports two transport modes:
+
+1. Simulated transport, intended as the main mode.
+   - Runs many Kademlia nodes inside the same Go process.
+   - Uses an in-memory SimulatedNetwork and SimulatedNode.
+   - Intended for larger-scale experiments, e.g. 1000+ nodes.
+
+2. UDP transport, intended as a secondary validation mode.
+   - Uses real UDP sockets through UDPNode.
+   - Intended for smaller containerized experiments, e.g. 50 Docker nodes.
+   - Used to check that the design can also work over a real network.
+
+Detailed changes
+----------------
+
+labs/kademlia/network.go
+- Added the Node interface used by Kademlia RPC code:
+  - Listen(address string) error
+  - Close() error
+  - Receive() (Message, error)
+  - SendData(address string, data []byte) error
+- Added SimulatedNode, which implements Node using the existing in-memory
+  SimulatedNetwork.
+- Added NewSimulatedNode().
+- Added NewSimulatedNodeWithNetwork(network *SimulatedNetwork).
+- Added UDPNode, which implements Node using UDP sockets.
+- Added NewUDPNode().
+- Changed Message to use string addresses and Data []byte:
+  - From string
+  - To string
+  - Data []byte
+- Added address parsing for simulated nodes using net.SplitHostPort.
+- Updated SimulatedConnection.Send to route messages by the string To address.
+
+labs/kademlia/kademliaid.go
+- Fixed NewKademliaID so invalid hex strings or wrong-length IDs return nil.
+- This prevents panics when malformed IDs are received or parsed.
+
+labs/main.go
+- Added a -transport flag.
+- Default transport is simulated:
+  go run . -transport simulated
+- UDP transport is still available:
+  go run . -transport udp
+- The main program now chooses between NewSimulatedNode() and NewUDPNode()
+  based on the flag.
+- The port flag text was changed from "UDP port" to "Network port".
+
+labs/docker-compose.yml
+- Changed the container command from an infinite sleep loop to running the app
+  with UDP transport:
+  ["./kadlab", "-transport", "udp"]
+- This makes the 50-replica Docker scenario use the real UDP transport.
+
+Verification performed
+----------------------
+- go test .\...
+- go build .
+- go run .\cmd\simshell ping 127.0.0.1:8000
+
+Notes
+-----
+- The simulated transport is now the primary path for larger experiments.
+- The UDP transport remains available for containerized real-network checks.
+- The Cobra simshell still runs and the ping command works.
