@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 )
 
@@ -14,6 +15,222 @@ const defaultNetworkAddress = "127.0.0.1:8000"
 // används defaultNetworkAddress.
 type Network struct {
 	Address string
+}
+
+// Node is the transport interface used by Kademlia RPCs.
+type Node interface {
+	Listen(address string) error
+	Close() error
+	Receive() (Message, error)
+	SendData(address string, data []byte) error
+}
+
+var defaultSimulatedNetwork = NewSimulatedNetwork()
+
+// SimulatedNode sends and receives Kademlia RPC payloads in memory.
+type SimulatedNode struct {
+	mu      sync.RWMutex
+	network *SimulatedNetwork
+	conn    Connection
+	address string
+}
+
+// NewSimulatedNode creates a Node backed by the process-wide simulated network.
+func NewSimulatedNode() *SimulatedNode {
+	return NewSimulatedNodeWithNetwork(defaultSimulatedNetwork)
+}
+
+// NewSimulatedNodeWithNetwork creates a Node backed by the provided simulation.
+func NewSimulatedNodeWithNetwork(network *SimulatedNetwork) *SimulatedNode {
+	if network == nil {
+		network = NewSimulatedNetwork()
+	}
+	return &SimulatedNode{network: network}
+}
+
+// Listen registers the node address in the simulated network.
+func (node *SimulatedNode) Listen(address string) error {
+	addr, err := parseSimulatedAddress(address)
+	if err != nil {
+		return err
+	}
+
+	conn, err := node.network.Listen(addr)
+	if err != nil {
+		return err
+	}
+
+	node.mu.Lock()
+	if node.conn != nil {
+		_ = node.conn.Close()
+	}
+	node.conn = conn
+	node.address = address
+	node.mu.Unlock()
+
+	return nil
+}
+
+// Close unregisters the node from the simulated network.
+func (node *SimulatedNode) Close() error {
+	node.mu.Lock()
+	conn := node.conn
+	node.conn = nil
+	node.address = ""
+	node.mu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
+}
+
+// Receive waits for the next in-memory message.
+func (node *SimulatedNode) Receive() (Message, error) {
+	node.mu.RLock()
+	conn := node.conn
+	node.mu.RUnlock()
+
+	if conn == nil {
+		return Message{}, errors.New("simulated node is not listening")
+	}
+
+	return conn.Recv()
+}
+
+// SendData sends data to another registered simulated node.
+func (node *SimulatedNode) SendData(address string, data []byte) error {
+	to, err := parseSimulatedAddress(address)
+	if err != nil {
+		return err
+	}
+
+	conn, err := node.network.Dial(to)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	node.mu.RLock()
+	from := node.address
+	node.mu.RUnlock()
+
+	return conn.Send(Message{
+		From: from,
+		To:   address,
+		Data: append([]byte(nil), data...),
+	})
+}
+
+// UDPNode sends and receives Kademlia RPC payloads over UDP.
+type UDPNode struct {
+	mu      sync.RWMutex
+	conn    *net.UDPConn
+	address string
+}
+
+// NewUDPNode creates a UDP-backed Node for container or real-network runs.
+func NewUDPNode() *UDPNode {
+	return &UDPNode{}
+}
+
+// Listen binds the UDP node to address.
+func (node *UDPNode) Listen(address string) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address %q: %w", address, err)
+	}
+
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return fmt.Errorf("listen on UDP address %q: %w", address, err)
+	}
+
+	node.mu.Lock()
+	if node.conn != nil {
+		_ = node.conn.Close()
+	}
+	node.conn = conn
+	node.address = conn.LocalAddr().String()
+	node.mu.Unlock()
+
+	return nil
+}
+
+// Close stops the UDP listener.
+func (node *UDPNode) Close() error {
+	node.mu.Lock()
+	conn := node.conn
+	node.conn = nil
+	node.address = ""
+	node.mu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
+}
+
+// Receive waits for the next UDP datagram.
+func (node *UDPNode) Receive() (Message, error) {
+	node.mu.RLock()
+	conn := node.conn
+	address := node.address
+	node.mu.RUnlock()
+
+	if conn == nil {
+		return Message{}, errors.New("UDP node is not listening")
+	}
+
+	buffer := make([]byte, 64*1024)
+	n, remoteAddr, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return Message{}, err
+	}
+
+	data := append([]byte(nil), buffer[:n]...)
+	from := ""
+	if remoteAddr != nil {
+		from = remoteAddr.String()
+	}
+
+	return Message{
+		From: from,
+		To:   address,
+		Data: data,
+	}, nil
+}
+
+// SendData sends one UDP datagram to address.
+func (node *UDPNode) SendData(address string, data []byte) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return fmt.Errorf("resolve UDP address %q: %w", address, err)
+	}
+
+	node.mu.RLock()
+	conn := node.conn
+	node.mu.RUnlock()
+
+	if conn != nil {
+		_, err = conn.WriteToUDP(data, udpAddr)
+		if err != nil {
+			return fmt.Errorf("write UDP message to %q: %w", address, err)
+		}
+		return nil
+	}
+
+	conn, err = net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		return fmt.Errorf("connect to UDP address %q: %w", address, err)
+	}
+	defer conn.Close()
+
+	if _, err = conn.Write(data); err != nil {
+		return fmt.Errorf("write UDP message to %q: %w", address, err)
+	}
+
+	return nil
 }
 
 // Listen startar en UDP-lyssnare för en nod.
@@ -156,9 +373,9 @@ type Address struct {
 
 // Message is the common message envelope for the in-memory network.
 type Message struct {
-	From    Address
-	To      Address
-	Payload []byte
+	From string
+	To   string
+	Data []byte
 }
 
 // SimulatedNetworkAPI describes the operations a node needs from a network:
@@ -234,6 +451,20 @@ func (n *SimulatedNetwork) Dial(addr Address) (Connection, error) {
 	}, nil
 }
 
+func parseSimulatedAddress(raw string) (Address, error) {
+	host, portText, err := net.SplitHostPort(raw)
+	if err != nil {
+		return Address{}, fmt.Errorf("invalid simulated address %q: %w", raw, err)
+	}
+
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return Address{}, fmt.Errorf("invalid simulated port %q: %w", portText, err)
+	}
+
+	return Address{IP: host, Port: port}, nil
+}
+
 // Send places a message in the destination listener's channel.
 func (c *SimulatedConnection) Send(msg Message) error {
 	c.mu.RLock()
@@ -246,16 +477,21 @@ func (c *SimulatedConnection) Send(msg Message) error {
 	c.network.mu.RLock()
 	defer c.network.mu.RUnlock()
 
-	recvCh, exists := c.network.listeners[msg.To]
+	to, err := parseSimulatedAddress(msg.To)
+	if err != nil {
+		return err
+	}
+
+	recvCh, exists := c.network.listeners[to]
 	if !exists {
-		return fmt.Errorf("destination address not found: %+v", msg.To)
+		return fmt.Errorf("destination address not found: %s", msg.To)
 	}
 
 	select {
 	case recvCh <- msg:
 		return nil
 	default:
-		return fmt.Errorf("message queue full for destination: %+v", msg.To)
+		return fmt.Errorf("message queue full for destination: %s", msg.To)
 	}
 }
 

@@ -16,7 +16,10 @@ type KademliaID [IDLength]byte
 // NewKademliaID skapar ett ID från en hex-sträng.
 // Strängen måste representera 32 bytes, alltså 64 hex-tecken.
 func NewKademliaID(data string) *KademliaID {
-	decoded, _ := hex.DecodeString(data)
+	decoded, err := hex.DecodeString(data)
+	if err != nil || len(decoded) != IDLength {
+		return nil
+	}
 
 	newKademliaID := KademliaID{}
 	for i := 0; i < IDLength; i++ {
