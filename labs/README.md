@@ -25,3 +25,7 @@ We want you to see for yourself how these are more complicated and less efficien
 You will assess these benefits by running some experiments on your implementation.
 
 We also want to introduce you to some of the tools and technologies that are commonly employed to build and manage distributed systems, such as containerization.
+
+## Testing the CLI
+
+See [cmd/README.md](cmd/README.md) for exact steps to run and test the CLI in both the simulated network and the real 50-node Docker network.
