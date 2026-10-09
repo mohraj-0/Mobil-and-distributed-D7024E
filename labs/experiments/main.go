@@ -313,6 +313,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if *resilienceMode {
+		if err := runResilience(opts); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	recorder, err := newLookupRecorder(opts.rawPath)
 	if err != nil {
@@ -396,8 +403,8 @@ func parseOptions() (options, error) {
 	if *lookups <= 0 {
 		return options{}, fmt.Errorf("lookups must be positive")
 	}
-	if *valueBytes <= 0 {
-		return options{}, fmt.Errorf("value-bytes must be positive")
+	if *valueBytes <= 0 || *valueBytes > kademlia.MaxValueSize {
+		return options{}, fmt.Errorf("value-bytes must be between 1 and %d", kademlia.MaxValueSize)
 	}
 	for _, nodeCount := range nodeCounts {
 		if nodeCount < 2 {

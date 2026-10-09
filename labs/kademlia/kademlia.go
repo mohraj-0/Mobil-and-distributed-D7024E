@@ -16,6 +16,21 @@ const defaultK = 10
 const defaultRPCTimeout = 2 * time.Second
 const defaultReplicationPeriod = 30 * time.Second
 
+// MaxValueSize is the maximum raw value size supported by both UDP and simulated
+// transports. JSON base64 encoding expands a 32 KiB value to about 44 KiB,
+// leaving room for RPC metadata in a single UDP datagram.
+const MaxValueSize = 32 * 1024
+
+func validateValueSize(value []byte) error {
+	if len(value) == 0 {
+		return fmt.Errorf("data is empty")
+	}
+	if len(value) > MaxValueSize {
+		return fmt.Errorf("value size %d exceeds maximum %d bytes", len(value), MaxValueSize)
+	}
+	return nil
+}
+
 // RPC-typer
 const (
 	rpcFindNode       = "FIND_NODE"
@@ -397,6 +412,7 @@ func (kademlia *Kademlia) handleFindValueRPC(rpc rpcMessage) {
 
 	kademlia.dataMu.RLock()
 	value, found := kademlia.DataStore[rpc.Key]
+	found = found && validateValueSize(value) == nil
 	if found {
 		value = append([]byte(nil), value...)
 	}
@@ -527,7 +543,7 @@ func (kademlia *Kademlia) handleStoreRPC(rpc rpcMessage) {
 
 	hash := sha256.Sum256(rpc.Value)
 	calculatedKey := KademliaID(hash)
-	stored := calculatedKey.String() == rpc.Key
+	stored := validateValueSize(rpc.Value) == nil && calculatedKey.String() == rpc.Key
 
 	if stored {
 		kademlia.ensureDataStore()
@@ -577,6 +593,9 @@ func (kademlia *Kademlia) handleStoreReplyRPC(rpc rpcMessage) {
 
 // Skickar STORE och väntar på svar.
 func (kademlia *Kademlia) sendStoreRPC(contact Contact, key *KademliaID, value []byte) error {
+	if err := validateValueSize(value); err != nil {
+		return err
+	}
 	if kademlia.Network == nil || kademlia.RoutingTable == nil {
 		return fmt.Errorf("network or routing table is not initialized")
 	}
@@ -676,7 +695,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 	if exists {
 		sum := sha256.Sum256(localValue)
 		calculatedKey := KademliaID(sum)
-		if calculatedKey.String() == hash {
+		if validateValueSize(localValue) == nil && calculatedKey.String() == hash {
 			return localValue, nil
 		}
 	}
@@ -746,6 +765,9 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 			}
 
 			if response.result.Found {
+				if validateValueSize(response.result.Value) != nil {
+					continue
+				}
 				sum := sha256.Sum256(response.result.Value)
 				calculatedKey := KademliaID(sum)
 
@@ -837,8 +859,8 @@ func (kademlia *Kademlia) StartReplication(
 
 // Lagrar data på de k närmaste noderna.
 func (kademlia *Kademlia) Store(data []byte) (string, error) {
-	if len(data) == 0 {
-		return "", fmt.Errorf("data is empty")
+	if err := validateValueSize(data); err != nil {
+		return "", err
 	}
 	if kademlia.RoutingTable == nil {
 		return "", fmt.Errorf("routing table is not initialized")
