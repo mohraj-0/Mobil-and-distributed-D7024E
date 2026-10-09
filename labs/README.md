@@ -28,6 +28,8 @@ We also want to introduce you to some of the tools and technologies that are com
 
 ## Testing the CLI
 
+See [implementation architecture](ARCHITECTURE.md) for a general sequence diagram and Mermaid diagrams covering each implementation file, lookups, joining, replication, transports, experiments, and deployment.
+
 Kademlia supports values from **1 byte to 32 KiB (32,768 bytes)**. See [Kademlia value sizes](kademlia/README.md) for the enforced limits, transport details, and boundary tests.
 
 See [cmd/README.md](cmd/README.md) for exact steps to run and test the CLI in both the simulated network and the real 50-node Docker network.
