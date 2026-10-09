@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kademlia architecture</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f1f5f9;color:#0f172a;font-family:Segoe UI,Arial,sans-serif}
+header,main{max-width:1500px;margin:auto;padding:28px}
+header h1{font-size:30px;margin:0 0 18px}.legend,nav{display:flex;flex-wrap:wrap;gap:10px}
+.legend span{padding:8px 13px;border-radius:8px;border:1px solid;font-weight:600;font-size:14px}
+.shell{background:#ede9fe;border-color:#7c3aed!important;color:#2e1065}
+.logic{background:#dbeafe;border-color:#2563eb!important;color:#172554}
+.sim{background:#ccfbf1;border-color:#0d9488!important;color:#134e4a}
+.real{background:#ffedd5;border-color:#ea580c!important;color:#7c2d12}
+.data{background:#dcfce7;border-color:#16a34a!important;color:#14532d}
+nav{margin-top:20px}nav a{color:#334155;background:white;padding:9px 12px;border-radius:7px;text-decoration:none;border:1px solid #cbd5e1}
+main{padding-top:0}.card{background:white;border:1px solid #cbd5e1;border-radius:14px;margin-bottom:28px;padding:24px;scroll-margin-top:20px}
+h2{font-size:23px;margin:0 0 24px}.diagram{overflow:auto;text-align:center;padding:8px}
+.mermaid{margin:0;white-space:pre-wrap;text-align:left}.mermaid svg{display:block;margin:auto;max-width:100%!important}
+.hint{font-size:14px;color:#475569;margin:18px 0 0}
+#error{display:none;color:#881337;background:#ffe4e6;padding:14px;border-radius:8px;margin-top:18px}
+</style>
+</head>
+<body>
+<header>
+<h1>Kademlia architecture</h1>
+<div class="legend"><span class="shell">Command shell</span><span class="logic">Kademlia logic</span><span class="sim">Simulated network</span><span class="real">Real UDP network</span><span class="data">Node state</span></div>
+<nav><a href="#view-1">1. General architecture</a><a href="#view-2">2. How Kademlia functions</a><a href="#view-3">3. How the simulated network functions</a><a href="#view-4">4. How the real UDP network functions</a><a href="#view-5">5. How the command shell starts each mode</a><a href="#view-6">6. How shell commands invoke Kademlia</a></nav>
+<p class="hint">Current implementation · Six flowcharts · Internet access is required to load the diagram renderer.</p>
+<div id="error" role="alert">The diagram renderer could not load or render. Check your internet connection, or view ARCHITECTURE.md on GitHub. Diagram source remains visible below if rendering failed.</div>
+</header>
+<main><section id="view-1" class="card"><h2>1. General architecture</h2><div class="diagram"><pre class="mermaid">flowchart TB
+    USER["User enters a command"]:::shell --&gt; CMD["Command shell&lt;br/&gt;Cobra / interactive REPL"]:::shell
+    CMD --&gt; KADE["Kademlia logic&lt;br/&gt;Join · LookupContact · Store · LookupData"]:::logic
+    subgraph STATE["Each Kademlia instance owns its state"]
+        ROUTE["Routing table&lt;br/&gt;Known peers sorted by XOR distance"]:::data
+        STORE["Data store&lt;br/&gt;SHA-256 key to value bytes"]:::data
+    end
+    KADE &lt;--&gt; ROUTE
+    KADE &lt;--&gt; STORE
+    KADE --&gt; RPC["JSON requests and replies&lt;br/&gt;Request IDs, response channels, timeouts"]:::logic
+    RPC --&gt; API["Node interface in network.go&lt;br/&gt;Listen · SendData · Receive · Close"]:::logic
+    API --&gt; SIM["SimulatedNode&lt;br/&gt;In-memory message channels"]:::sim
+    API --&gt; UDP["UDPNode&lt;br/&gt;Real UDP sockets"]:::real
+    SIM &lt;--&gt; SPEERS["Other Kademlia instances&lt;br/&gt;Same Go process, shared simulation"]:::sim
+    UDP &lt;--&gt; RPEERS["Other Kademlia instances&lt;br/&gt;Other processes or Docker containers"]:::real
+    API -.-&gt; SAME["Same Kademlia functions&lt;br/&gt;Different transport implementation"]:::logic
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section>
+<section id="view-2" class="card"><h2>2. How Kademlia functions</h2><div class="diagram"><pre class="mermaid">flowchart TB
+    CALL["Shell calls a Kademlia operation"]:::shell --&gt; OP{"Which operation?"}:::choice
+    OP --&gt;|Join| JOIN["Add bootstrap contact&lt;br/&gt;Look up own ID&lt;br/&gt;Refresh 256 XOR-distance ranges"]:::logic
+    OP --&gt;|LookupContact| FIND["Select nearest unqueried peers&lt;br/&gt;FIND_NODE probes in parallel batches"]:::logic
+    OP --&gt;|Store| PUT["Validate 1-32768 bytes&lt;br/&gt;Compute SHA-256&lt;br/&gt;Discover up to K replicas"]:::logic
+    OP --&gt;|LookupData| GET["Check local store&lt;br/&gt;Otherwise probe peers with FIND_VALUE"]:::logic
+    JOIN --&gt; FIND
+    JOIN --&gt; ROUTE["Routing table&lt;br/&gt;Learn contacts from replies"]:::data
+    FIND &lt;--&gt; ROUTE
+    PUT --&gt; SAVE["Save locally if selected&lt;br/&gt;Send STORE to remote replicas"]:::logic
+    GET &lt;--&gt; LOCAL["Local data store"]:::data
+    FIND --&gt; RPC["RPC engine&lt;br/&gt;Register request ID before sending"]:::logic
+    SAVE --&gt; RPC
+    GET --&gt; RPC
+    RPC --&gt; NET["Node transport&lt;br/&gt;SimulatedNode or UDPNode"]:::logic
+    NET --&gt; REPLY{"Reply received before timeout?"}:::choice
+    REPLY --&gt;|Yes| HANDLE["Match request ID&lt;br/&gt;Learn contacts and process result"]:::logic
+    REPLY --&gt;|No| FAIL["RPC error&lt;br/&gt;Lookup can continue with other candidates"]:::failure
+    HANDLE --&gt; VALIDATE["Value replies: verify size and SHA-256&lt;br/&gt;STORE replies: count accepted replicas"]:::logic
+    VALIDATE --&gt; RESULT["Return contacts, verified bytes, or store key&lt;br/&gt;Store requires at least one accepting replica"]:::logic
+    HANDLE --&gt; ROUTE
+    HANDLE --&gt; LOCAL
+    RESULT --&gt; OUT["Shell prints result or writes file"]:::shell
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section>
+<section id="view-3" class="card"><h2>3. How the simulated network functions</h2><div class="diagram"><pre class="mermaid">flowchart LR
+    subgraph A["Node A — same Go process"]
+        KA["Kademlia A&lt;br/&gt;Creates JSON RPC"]:::logic
+        SA["SimulatedNode A&lt;br/&gt;SendData(destination, bytes)"]:::sim
+        KA --&gt; SA
+    end
+    subgraph BUS["Shared SimulatedNetwork"]
+        REG["Listen registers addresses&lt;br/&gt;Map protected by mutex"]:::sim
+        DIAL["Dial destination address&lt;br/&gt;Create sending connection"]:::sim
+        SEND["Connection.Send&lt;br/&gt;Message: From, To, Data"]:::sim
+        QUEUE["Destination buffered channel&lt;br/&gt;1024 message slots"]:::sim
+        REG -.-&gt; QUEUE
+        DIAL --&gt; SEND --&gt; QUEUE
+    end
+    subgraph B["Node B — same Go process"]
+        SB["SimulatedNode B&lt;br/&gt;Receive / Connection.Recv"]:::sim
+        KB["Kademlia B&lt;br/&gt;ListenForRPC dispatches handler"]:::logic
+        SB --&gt; KB
+    end
+    SA --&gt; DIAL
+    QUEUE --&gt; SB
+    KB --&gt; REPLY["Reply uses the same path&lt;br/&gt;Back to node A's channel"]:::sim
+    REPLY --&gt; KA
+    SEND -.-&gt; ERROR["Unknown address or full queue&lt;br/&gt;Return send error"]:::failure
+    REG -.-&gt; CLOSE["Close listener&lt;br/&gt;Unregister address, close channel&lt;br/&gt;Receive loop exits"]:::sim
+    BUS -.-&gt; NOTE["No UDP port is bound&lt;br/&gt;1000 nodes can share this transport fabric"]:::sim
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section>
+<section id="view-4" class="card"><h2>4. How the real UDP network functions</h2><div class="diagram"><pre class="mermaid">flowchart LR
+    subgraph A["Process or container A"]
+        KA["Kademlia A&lt;br/&gt;JSON RPC and request ID"]:::logic
+        UA["UDPNode A&lt;br/&gt;Listen binds a UDP socket"]:::real
+        SEND["SendData&lt;br/&gt;WriteToUDP / DialUDP"]:::real
+        KA --&gt; UA --&gt; SEND
+    end
+    WIRE["Real network&lt;br/&gt;One UDP datagram per message"]:::real
+    SEND --&gt; WIRE
+    subgraph B["Process or container B"]
+        UB["UDPNode B&lt;br/&gt;Bound UDP socket"]:::real
+        RECV["Receive / ReadFromUDP&lt;br/&gt;64 KiB receive buffer&lt;br/&gt;Copy received bytes"]:::real
+        KB["Kademlia B&lt;br/&gt;ListenForRPC dispatches JSON handler"]:::logic
+        UB --&gt; RECV --&gt; KB
+    end
+    WIRE --&gt; UB
+    KB --&gt; BACK["Reply datagram&lt;br/&gt;SendData back to A"]:::real
+    BACK --&gt; RECEIVEA["UDPNode A receives reply"]:::real
+    RECEIVEA --&gt; MATCH["Kademlia A matches request ID&lt;br/&gt;Signals pending response channel"]:::logic
+    MATCH --&gt; KA
+    WIRE -.-&gt; LOSS["Packet loss / excessive delay"]:::failure
+    LOSS --&gt; TIMEOUT["Kademlia RPC deadline expires"]:::failure
+    UA -.-&gt; ADDR["Bind address: local socket&lt;br/&gt;Advertised address: how peers reach this node"]:::real
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section>
+<section id="view-5" class="card"><h2>5. How the command shell starts each mode</h2><div class="diagram"><pre class="mermaid">flowchart TB
+    INPUT["Run simshell or enter a REPL command"]:::shell --&gt; PARSE["Cobra parses command and flags"]:::shell
+    PARSE --&gt; MODE{"--transport"}:::choice
+    subgraph SIMMODE["SIMULATED — many instances in one process"]
+        SC["configureSimulated"]:::shell
+        BUS["NewSimulatedNetwork&lt;br/&gt;One shared channel-based network"]:::sim
+        SN["Create --nodes instances&lt;br/&gt;Each gets NewSimulatedNodeWithNetwork"]:::sim
+        SK["newNode&lt;br/&gt;Create contact, routing table, Kademlia instance"]:::logic
+        SL["Start ListenForRPC for every instance"]:::logic
+        SJ["First instance becomes the shell node&lt;br/&gt;Other instances Join the first node"]:::logic
+        SC --&gt; BUS --&gt; SN --&gt; SK --&gt; SL --&gt; SJ
+    end
+    subgraph REALMODE["REAL UDP — one instance per process"]
+        RC["configureUDP"]:::shell
+        UN["NewUDPNode"]:::real
+        BIND["newNode&lt;br/&gt;Listen on --listen-addr or --addr"]:::real
+        UK["Create contact from advertised --addr&lt;br/&gt;Create routing table and Kademlia instance"]:::logic
+        UL["Start ListenForRPC"]:::logic
+        HAS{"--bootstrap-addr configured?"}:::choice
+        JOIN["Join bootstrap node&lt;br/&gt;Self lookup and range refresh"]:::logic
+        FIRST["Run without bootstrap&lt;br/&gt;Can serve as bootstrap for other nodes"]:::logic
+        RC --&gt; UN --&gt; BIND --&gt; UK --&gt; UL --&gt; HAS
+        HAS --&gt;|Yes| JOIN
+        HAS --&gt;|No| FIRST
+    end
+    MODE --&gt;|simulated| SC
+    MODE --&gt;|udp| RC
+    SJ --&gt; READY["Shell keeps its selected Kademlia node&lt;br/&gt;Execute the requested command"]:::shell
+    JOIN --&gt; READY
+    FIRST --&gt; READY
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section>
+<section id="view-6" class="card"><h2>6. How shell commands invoke Kademlia</h2><div class="diagram"><pre class="mermaid">flowchart TB
+    USER["Direct command or interactive input"]:::shell --&gt; DISPATCH["Cobra command dispatch&lt;br/&gt;Uses the configured shell node"]:::shell
+    DISPATCH --&gt; CMD{"Command"}:::choice
+    CMD --&gt;|put / store FILENAME| READ["Read file bytes"]:::shell
+    READ --&gt; STORE["Kademlia.Store&lt;br/&gt;Hash value and replicate"]:::logic
+    STORE --&gt; KEY["Print SHA-256 key"]:::shell
+    CMD --&gt;|get KEY| LOOKUP["Kademlia.LookupData&lt;br/&gt;Local check or remote FIND_VALUE"]:::logic
+    LOOKUP --&gt; VERIFY["Verify returned hash&lt;br/&gt;Print bytes or write output file"]:::shell
+    CMD --&gt;|ping ADDRESS| FIND["Kademlia.LookupContact&lt;br/&gt;Check returned contact for address"]:::logic
+    FIND --&gt; PONG["Print result&lt;br/&gt;Not a dedicated JSON PING/PONG exchange"]:::shell
+    CMD --&gt;|show rt / ds / nodes| SHOW["Inspect routing table, data store, or peers"]:::data
+    CMD --&gt;|serve| SERVE["Keep process alive&lt;br/&gt;RPC listener serves incoming requests"]:::logic
+    CMD --&gt;|exit / quit / EOF| CLOSE["Close local and peer transports"]:::shell
+    STORE -.-&gt; TRANSPORT["Same calls in both modes&lt;br/&gt;The node's Network field selects transport"]:::logic
+    LOOKUP -.-&gt; TRANSPORT
+    FIND -.-&gt; TRANSPORT
+    TRANSPORT --&gt; SIM["SimulatedNode&lt;br/&gt;Channels in this process"]:::sim
+    TRANSPORT --&gt; UDP["UDPNode&lt;br/&gt;Datagrams to other processes"]:::real
+    classDef shell fill:#ede9fe,stroke:#7c3aed,color:#2e1065,stroke-width:2px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef sim fill:#ccfbf1,stroke:#0d9488,color:#134e4a,stroke-width:2px
+    classDef real fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef choice fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef failure fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px</pre></div></section></main>
+<script type="module">
+try {
+  const {default: mermaid} = await import('https://cdn.jsdelivr.net/npm/mermaid@11.12.3/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{fontFamily:'Segoe UI, Arial, sans-serif',fontSize:'16px',lineColor:'#64748b',clusterBkg:'#f8fafc',clusterBorder:'#94a3b8'},flowchart:{htmlLabels:true,useMaxWidth:true,curve:'basis'}});
+  for (const element of document.querySelectorAll('.mermaid')) {
+    await mermaid.run({nodes:[element]});
+  }
+} catch(error) {
+  document.getElementById('error').style.display='block';
+  console.error(error);
+}
+</script>
+</body>
+</html>
+

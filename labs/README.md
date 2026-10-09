@@ -28,7 +28,7 @@ We also want to introduce you to some of the tools and technologies that are com
 
 ## Testing the CLI
 
-See [implementation architecture](ARCHITECTURE.md) for a general sequence diagram and Mermaid diagrams covering each implementation file, lookups, joining, replication, transports, experiments, and deployment.
+See the [architecture flowcharts](ARCHITECTURE.md) for Kademlia operations, simulated and real UDP networking, and command-shell startup and invocation. Open [the browser viewer](architecture.html) to view the colorful diagrams directly (internet access required).
 
 Kademlia supports values from **1 byte to 32 KiB (32,768 bytes)**. See [Kademlia value sizes](kademlia/README.md) for the enforced limits, transport details, and boundary tests.
 
