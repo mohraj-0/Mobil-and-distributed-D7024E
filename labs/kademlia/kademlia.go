@@ -913,7 +913,9 @@ func (kademlia *Kademlia) Store(data []byte) (string, error) {
 			kademlia.dataMu.Lock()
 			kademlia.DataStore[key.String()] = append([]byte(nil), data...)
 			kademlia.dataMu.Unlock()
+			resultMu.Lock()
 			successful++
+			resultMu.Unlock()
 			continue
 		}
 
