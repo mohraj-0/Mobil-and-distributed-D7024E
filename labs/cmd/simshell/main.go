@@ -31,12 +31,11 @@ type options struct {
 }
 
 type shell struct {
-	opts            options
-	node            *kademlia.Kademlia
-	contact         kademlia.Contact
-	network         kademlia.Node
-	peers           []*kademlia.Kademlia
-	replicationStop chan struct{}
+	opts    options
+	node    *kademlia.Kademlia
+	contact kademlia.Contact
+	network kademlia.Node
+	peers   []*kademlia.Kademlia
 }
 
 func main() {
@@ -79,7 +78,6 @@ func (s *shell) root() *cobra.Command {
 
 	root.AddCommand(
 		&cobra.Command{Use: "serve", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
-			s.startReplication()
 			fmt.Printf("serving %s node %s id=%s\n", s.opts.transport, s.contact.Address, shortID(s.contact.ID))
 			select {}
 		}},
@@ -222,7 +220,6 @@ func newNode(listenAddr string, advertiseAddr string, network kademlia.Node) (*k
 }
 
 func (s *shell) repl() {
-	s.startReplication()
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Printf("simshell %s node %s id=%s nodes=%d\n", s.opts.transport, s.contact.Address, shortID(s.contact.ID), len(s.peers))
 	for {
@@ -461,10 +458,6 @@ func (s *shell) show(what string) error {
 }
 
 func (s *shell) close() {
-	if s.replicationStop != nil {
-		close(s.replicationStop)
-		s.replicationStop = nil
-	}
 	if s.network != nil {
 		_ = s.network.Close()
 	}
@@ -474,14 +467,6 @@ func (s *shell) close() {
 		}
 		_ = node.Network.Close()
 	}
-}
-
-func (s *shell) startReplication() {
-	if s.node == nil || s.replicationStop != nil {
-		return
-	}
-	s.replicationStop = make(chan struct{})
-	go s.node.StartReplication(s.replicationStop)
 }
 
 func hashID(address string) *kademlia.KademliaID {
