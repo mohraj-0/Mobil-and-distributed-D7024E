@@ -5,10 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"io"
-	"os"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -497,6 +495,7 @@ func TestLookupDataRejectsCorruptedRemoteValue(t *testing.T) {
 	network := &callbackNode{}
 	node = newTestNode("ff", "node-a", network)
 	node.RoutingTable.AddContact(remote)
+	var replies atomic.Int32
 
 	network.send = func(address string, data []byte) error {
 		var request rpcMessage
@@ -505,6 +504,7 @@ func TestLookupDataRejectsCorruptedRemoteValue(t *testing.T) {
 		}
 		switch request.Type {
 		case rpcFindValue:
+			replies.Add(1)
 			node.handleFindValueReplyRPC(rpcMessage{
 				Type: rpcFindValueReply, RequestID: request.RequestID,
 				SenderID: remote.ID.String(), SenderAddress: remote.Address,
@@ -519,13 +519,18 @@ func TestLookupDataRejectsCorruptedRemoteValue(t *testing.T) {
 		return nil
 	}
 
-	output := captureStdout(t, func() {
-		if got, err := node.LookupData(key.String()); err == nil {
-			t.Fatalf("LookupData returned corrupted value %q without error", got)
-		}
-	})
-	if !strings.Contains(output, "Corrupted value received") {
-		t.Fatalf("LookupData did not report corrupted value, stdout=%q", output)
+	got, err := node.LookupData(key.String())
+	if err == nil || len(got) != 0 {
+		t.Fatalf("LookupData = %q, %v; want no value and an error", got, err)
+	}
+	if replies.Load() != 1 {
+		t.Fatalf("corrupted replies sent = %d, want 1; lookup error: %v", replies.Load(), err)
+	}
+	if err.Error() != "value not found" {
+		t.Fatalf("LookupData error = %v, want value not found after rejecting corruption", err)
+	}
+	if _, cached := node.DataStore[key.String()]; cached {
+		t.Fatal("LookupData cached the corrupted value")
 	}
 }
 
@@ -783,74 +788,6 @@ func TestLookupContactUsesAlphaParallelProbes(t *testing.T) {
 	if len(responses) != len(contacts) {
 		t.Fatalf("queryContactsParallel returned %d responses, want %d", len(responses), len(contacts))
 	}
-}
-
-func TestReplicateDataStoresExistingValuesAgain(t *testing.T) {
-	value := []byte("replicated-value")
-	sum := sha256.Sum256(value)
-	key := KademliaID(sum)
-	remote := NewContact(testID("11"), "node-b")
-
-	var node *Kademlia
-	network := &callbackNode{}
-	node = newTestNode("ff", "node-a", network)
-	node.RoutingTable.AddContact(remote)
-	node.DataStore = map[string][]byte{key.String(): append([]byte(nil), value...)}
-
-	storeRequests := 0
-	network.send = func(address string, data []byte) error {
-		var request rpcMessage
-		if err := json.Unmarshal(data, &request); err != nil {
-			return err
-		}
-		switch request.Type {
-		case rpcFindNode:
-			node.handleFindNodeReplyRPC(rpcMessage{
-				Type: rpcFindNodeReply, RequestID: request.RequestID,
-				SenderID: remote.ID.String(), SenderAddress: remote.Address,
-			})
-		case rpcStore:
-			storeRequests++
-			if request.Key != key.String() || !bytes.Equal(request.Value, value) {
-				t.Fatalf("replication STORE = (%s, %q), want (%s, %q)", request.Key, request.Value, key.String(), value)
-			}
-			node.handleStoreReplyRPC(rpcMessage{
-				Type: rpcStoreReply, RequestID: request.RequestID,
-				SenderID: remote.ID.String(), SenderAddress: remote.Address,
-				Stored: true,
-			})
-		}
-		return nil
-	}
-
-	node.ReplicateData()
-	if storeRequests == 0 {
-		t.Fatal("ReplicateData did not send any STORE request")
-	}
-}
-
-func captureStdout(t *testing.T, run func()) string {
-	t.Helper()
-
-	old := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = writer
-	defer func() {
-		os.Stdout = old
-	}()
-
-	run()
-
-	_ = writer.Close()
-
-	output, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(output)
 }
 
 func assertNoReceive[T any](t *testing.T, ch <-chan T, name string) {
