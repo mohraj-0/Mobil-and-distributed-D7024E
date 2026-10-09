@@ -28,3 +28,4 @@ Raw CSV columns include:
 
 The topology and key-value pairs are generated with `math/rand` from the given
 seed list, so rerunning with the same flags recreates the same experiment.
+all of this has to be verified.
