@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -808,4 +809,134 @@ func assertReceive[T any](t *testing.T, ch <-chan T, name string) {
 	case <-time.After(time.Second):
 		t.Fatalf("%s was not delivered", name)
 	}
+}
+
+// TestThousandNodesCommunicateOverSimulatedNetwork verifies the requirement that
+// at least 1,000 Kademlia instances communicate over network.go's simulated network.
+// It also verifies storage and retrieval from a remote replica and runs in normal CI.
+// Every instance sends and answers a real RPC over network.go's shared simulation.
+func TestThousandNodesCommunicateOverSimulatedNetwork(t *testing.T) {
+	const nodeCount = 1000
+	network := NewSimulatedNetwork()
+	nodes := make([]*Kademlia, nodeCount)
+	contacts := make([]Contact, nodeCount)
+	transports := make([]*SimulatedNode, 0, nodeCount)
+	var listeners sync.WaitGroup
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			if err := transport.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+		listeners.Wait()
+		network.mu.RLock()
+		remaining := len(network.listeners)
+		network.mu.RUnlock()
+		if remaining != 0 {
+			t.Errorf("cleanup left %d simulated listeners", remaining)
+		}
+	})
+
+	value := []byte("value stored and retrieved across a 1000-node simulated network")
+	for i := range nodes {
+		address := fmt.Sprintf("127.0.0.1:%d", 10000+i)
+		transport := NewSimulatedNodeWithNetwork(network)
+		if err := transport.Listen(address); err != nil {
+			t.Fatalf("listen node %d: %v", i, err)
+		}
+		transports = append(transports, transport)
+		id := KademliaID(sha256.Sum256([]byte(address)))
+		if i == 0 {
+			// Make node 0 the closest replica for this value, ensuring it is stored.
+			id = KademliaID(sha256.Sum256(value))
+		}
+		contacts[i] = NewContact(&id, address)
+		nodes[i] = &Kademlia{RoutingTable: NewRoutingTable(contacts[i]), Network: transport, Alpha: 3, K: 3, RPCTimeout: 5 * time.Second}
+	}
+	// Give each node a small initial set of peers, avoiding a million-contact setup.
+	for i, node := range nodes {
+		for bit := 0; bit < 10; bit++ {
+			peer := i ^ (1 << bit)
+			if peer < nodeCount {
+				node.RoutingTable.AddContact(contacts[peer])
+			}
+		}
+		node.RoutingTable.AddContact(contacts[(i+1)%nodeCount])
+	}
+	for _, node := range nodes {
+		listeners.Add(1)
+		go func(node *Kademlia) {
+			defer listeners.Done()
+			node.ListenForRPC()
+		}(node)
+	}
+
+	// A ring ensures all 1000 nodes both send a request and answer another node.
+	// Bound concurrent requests to keep this test practical under the race detector.
+	jobs := make(chan int, nodeCount)
+	results := make(chan error, nodeCount)
+	for i := range nodes {
+		jobs <- i
+	}
+	close(jobs)
+	for worker := 0; worker < 32; worker++ {
+		go func() {
+			for i := range jobs {
+				peer := (i + 1) % nodeCount
+				found, err := nodes[i].sendFindNodeRPC(contacts[peer], contacts[i].ID)
+				if err != nil {
+					results <- fmt.Errorf("node %d -> node %d: %w", i, peer, err)
+					continue
+				}
+				matched := false
+				for _, contact := range found {
+					if contact.ID != nil && contact.ID.Equals(contacts[i].ID) && contact.Address == contacts[i].Address {
+						matched = true
+					}
+				}
+				if !matched {
+					results <- fmt.Errorf("node %d received a reply without the requested contact", i)
+				} else {
+					results <- nil
+				}
+			}
+		}()
+	}
+	completed := 0
+	for range nodes {
+		if err := <-results; err != nil {
+			t.Error(err)
+		} else {
+			completed++
+		}
+	}
+	if completed != nodeCount {
+		t.Fatalf("completed %d/%d request/response exchanges", completed, nodeCount)
+	}
+	t.Logf("%d live nodes completed %d FIND_NODE request/response exchanges over network.go's simulated network", nodeCount, completed)
+
+	key, err := nodes[0].Store(value)
+	if err != nil {
+		t.Fatalf("store on 1000-node network: %v", err)
+	}
+	// Choose a non-replica so FIND_VALUE must cross the simulated network.
+	reader := -1
+	for i := 1; i < nodeCount; i++ {
+		nodes[i].dataMu.RLock()
+		_, cached := nodes[i].DataStore[key]
+		nodes[i].dataMu.RUnlock()
+		if !cached {
+			reader = i
+			break
+		}
+	}
+	if reader < 0 {
+		t.Fatal("no non-replica available for remote lookup")
+	}
+	nodes[reader].addContact(contacts[0])
+	got, err := nodes[reader].LookupData(key)
+	if err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("remote lookup from node %d: value=%q error=%v", reader, got, err)
+	}
+	t.Logf("node 0 stored %d bytes; non-replica node %d retrieved identical bytes", len(value), reader)
 }
