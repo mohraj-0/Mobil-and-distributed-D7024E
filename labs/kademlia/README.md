@@ -1,5 +1,17 @@
 # Kademlia value sizes
 
+## 1,000-node simulated-network test
+
+`TestThousandNodesCommunicateOverSimulatedNetwork` creates 1,000 actual Kademlia instances using `NewSimulatedNetwork` and `NewSimulatedNodeWithNetwork` from `network.go`. All instances remain live while each completes a FIND_NODE request/response exchange with the next node in a ring. The test validates reply contents, then stores a value and retrieves it from a non-replica through FIND_VALUE. Cleanup closes every transport and waits for listener loops to exit.
+
+This test runs in the normal test suite and CI's race-detector step; it is not gated behind a benchmark or an optional flag. Run it from `labs` with:
+
+```powershell
+go test ./kademlia -run TestThousandNodesCommunicateOverSimulatedNetwork -v
+```
+
+## Supported values
+
 This implementation supports **1 through 32,768 raw bytes (32 KiB) per value**, inclusive. The exported `kademlia.MaxValueSize` constant defines the upper limit. The same limit applies to UDP and simulated networks; values may contain arbitrary binary bytes, including zero bytes. Sizes are byte counts, not character counts.
 
 | Raw value size | Supported |
