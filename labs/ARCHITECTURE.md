@@ -1,8 +1,16 @@
 # Implementation architecture
 
-These diagrams describe the current Part 1 implementation. Read the general sequence first, then use the file diagrams to locate each responsibility. Arrows in flowcharts mean calls or data flow; arrows in sequence diagrams show runtime message order. A peer represents another instance of the same Kademlia implementation.
+```mermaid
+flowchart LR
+    GUIDE["Implementation architecture"] --> CURRENT["Implemented: Part 1<br/>DHT, CLI, transports, and experiments"]
+    GUIDE --> PLANNED["Design only: Part 2<br/>Signatures, DNS ownership, version chains, latest pointers"]
+    CURRENT --> ORDER["Read general sequence first<br/>Then inspect file diagrams"]
+    ORDER --> FLOW["Flowchart arrows<br/>Calls or data flow"]
+    ORDER --> SEQ["Sequence arrows<br/>Runtime message order"]
+    CURRENT --> PEER["Every peer is another Kademlia instance<br/>Own listener, routing table, and data store"]
+```
 
-Part 2 publication signatures, DNS ownership, version records, and mutable latest pointers are described in [PART2-DESIGN.md](PART2-DESIGN.md) but are not implemented in the current Go code.
+[Part 2 design](PART2-DESIGN.md)
 
 ## Diagram index
 
@@ -23,7 +31,7 @@ Part 2 publication signatures, DNS ownership, version records, and mutable lates
 
 ## General functionality
 
-Sources: [CLI](cmd/simshell/main.go), [Kademlia operations](kademlia/kademlia.go), [transports](kademlia/network.go). This example stores a file and then retrieves its value by hash. Discovery can require several rounds; each replica has its own listener, routing table, and data store.
+[CLI](cmd/simshell/main.go) · [Kademlia operations](kademlia/kademlia.go) · [Transports](kademlia/network.go)
 
 ```mermaid
 sequenceDiagram
@@ -60,7 +68,8 @@ sequenceDiagram
             Transport-->>Local: Complete pending STORE request
         end
     end
-    Note over Local,Peer: Remote STORE requests run concurrently
+    Note over Local,Peer: Remote STORE requests run concurrently; wait for all attempts
+    Note over Local,Peer: Store succeeds when at least one selected replica accepts
     Local-->>CLI: Key, or error if no replica accepted
     CLI-->>User: Print key
 
@@ -84,8 +93,6 @@ sequenceDiagram
 ```
 
 ## File relationships
-
-This is a component map rather than a struct-by-struct UML diagram.
 
 ```mermaid
 flowchart TD
@@ -112,15 +119,16 @@ flowchart TD
 
 ## kademlia.go: operations and state
 
-Source: [kademlia.go](kademlia/kademlia.go). Defaults are `Alpha=3`, `K=10`, RPC timeout 2 seconds, and replication interval 30 seconds. Supported raw value sizes are 1–32,768 bytes.
+[kademlia.go](kademlia/kademlia.go)
 
 ```mermaid
 flowchart LR
     API["Kademlia operations"]
+    SETTINGS["Defaults<br/>Alpha = 3, K = 10<br/>RPC timeout = 2 s<br/>Replication interval = 30 s"] -.-> API
     API --> JOIN["Join / Refresh<br/>Bootstrap and discover peers"]
     API --> LOOK["LookupContact<br/>Iterative FIND_NODE"]
     API --> GET["LookupData<br/>Local check, then FIND_VALUE"]
-    API --> STORE["Store<br/>Hash bytes and select K replicas"]
+    API --> STORE["Store<br/>Validate 1-32768 raw bytes<br/>Hash bytes and select K replicas"]
     API --> REP["ReplicateData<br/>Store copies again"]
     JOIN --> LOOK
     STORE --> LOOK
@@ -137,17 +145,36 @@ flowchart LR
     SR --> PENDING
     PENDING --> NET["Network.SendData / Receive"]
     NET --> LISTEN["ListenForRPC<br/>Dispatch each message in a goroutine"]
-    LISTEN --> HANDLERS["Request handlers and reply handlers"]
+    LISTEN --> HANDLERS["Request handlers: answer FIND_NODE, FIND_VALUE, STORE<br/>Reply handlers: learn contacts and signal waiting request"]
     HANDLERS --> DS
     HANDLERS --> RT
     HANDLERS --> PENDING
 ```
 
-Request handlers answer FIND_NODE, FIND_VALUE, and STORE. Reply handlers update routing knowledge and signal the waiting request channel. `Store` waits for its remote replication attempts and succeeds if at least one selected replica accepted the value; it does not require all K replicas to succeed.
+```mermaid
+sequenceDiagram
+    participant Operation as Lookup / Store
+    participant Pending as Pending-response map
+    participant Transport as Node transport
+    participant Handler as Local reply handler
+
+    Operation->>Operation: Generate random request ID
+    Operation->>Pending: Register buffered response channel
+    Operation->>Transport: Send JSON request to peer
+    alt Matching reply arrives
+        Transport->>Handler: Receive reply
+        Handler->>Handler: Learn sender and returned contacts
+        Handler->>Pending: Find channel for request ID
+        Pending-->>Operation: Deliver response
+    else No matching reply before deadline
+        Operation->>Operation: Return RPC timeout error
+    end
+    Operation->>Pending: Remove pending request
+```
 
 ## kademlia.go: parallel lookup
 
-Sources: `lookupContactParallel`, `queryContactsParallel`, and the three `send...RPC` methods in [kademlia.go](kademlia/kademlia.go). Each outgoing request registers its response channel before sending, then waits for the matching reply or a timeout.
+[kademlia.go](kademlia/kademlia.go)
 
 ```mermaid
 sequenceDiagram
@@ -176,13 +203,31 @@ sequenceDiagram
         Lookup->>Lookup: Keep nearest candidates and mark queried IDs
     end
     Lookup-->>Lookup: Return nearest known contacts
+    Note over Lookup,C: Timed-out peers can remain known candidates; returned contact does not prove liveness
 ```
 
-Contact lookup uses strict parallel batches. Failed probes contribute no new contacts, but known candidates can remain in the returned shortlist; a returned contact alone is not proof of a successful liveness check. Value lookup uses FIND_VALUE batches and can return as soon as a valid value is received rather than waiting for every remaining response.
+```mermaid
+flowchart TD
+    GET["LookupData(key)"] --> LOCAL{"Valid local value?"}
+    LOCAL -->|Yes| VALUE["Return verified bytes"]
+    LOCAL -->|No| BATCH["Send up to alpha FIND_VALUE probes concurrently"]
+    BATCH --> RESPONSE{"Next probe result"}
+    RESPONSE -->|RPC error| MORE{"Unprocessed results in this round?"}
+    RESPONSE -->|Contacts| LEARN["Merge, deduplicate, and sort candidates"]
+    LEARN --> MORE
+    RESPONSE -->|Value| CHECK{"Supported size and correct SHA-256?"}
+    CHECK -->|Yes| VALUE
+    CHECK -->|No| MORE
+    MORE -->|Yes| RESPONSE
+    MORE -->|No| LEFT{"Unqueried candidates remain?"}
+    LEFT -->|Yes| BATCH
+    LEFT -->|No| FAIL["Return value-not-found error"]
+    VALUE -.-> EARLY["May return before remaining probes finish"]
+```
 
 ## kademlia.go: joining and refresh
 
-Source: `Join` and `Refresh` in [kademlia.go](kademlia/kademlia.go).
+[kademlia.go](kademlia/kademlia.go)
 
 ```mermaid
 sequenceDiagram
@@ -199,6 +244,7 @@ sequenceDiagram
     Peers-->>Joiner: FIND_NODE replies
     Joiner->>RT: Learn neighbors from replies
     loop XOR-distance ranges 0 through 255
+        Note over Joiner,RT: Range indices differ from dynamically allocated routing-tree leaf indices
         Joiner->>Joiner: Refresh(index)
         Joiner->>Joiner: Copy local ID and flip the indexed bit
         Joiner->>Joiner: Randomize less significant bits
@@ -207,17 +253,17 @@ sequenceDiagram
         Joiner->>RT: Learn replying peers and returned contacts
     end
     Joiner-->>Startup: Join returns
+    Note over Startup,Peers: Lookup failures are not propagated; nil does not guarantee a responsive bootstrap
 ```
-
-Refresh indices here identify 256 XOR-distance ranges. They are not the dynamically allocated leaf indices used by the routing tree's inspection methods. `Join` validates configuration but currently does not propagate failed lookup probes, so its nil result does not guarantee a responsive bootstrap.
 
 ## kademlia.go: replication
 
-Source: `StartReplication` and `ReplicateData` in [kademlia.go](kademlia/kademlia.go).
+[kademlia.go](kademlia/kademlia.go)
 
 ```mermaid
 flowchart TD
     START["Caller starts StartReplication in a goroutine"] --> WAIT["Wait for ticker or stop channel"]
+    INACTIVE["Current CLI and experiments<br/>Do not start this loop automatically"] -.-> START
     WAIT --> EVENT{"Which event?"}
     EVENT -->|Stop| EXIT["Stop ticker and return"]
     EVENT -->|Tick| SNAP["Copy local values under read lock"]
@@ -226,13 +272,12 @@ flowchart TD
     EACH --> SELECT["Discover currently closest peers"]
     SELECT --> COPY["Re-store on up to K replicas"]
     COPY --> WAIT
+    COPY -.-> KEEP["Values remain stored<br/>No expiration"]
 ```
-
-The replication functions exist, but the current CLI and experiment startup paths do not call `StartReplication`. The diagram shows how an explicit caller activates it. Values do not expire.
 
 ## network.go: transport implementations
 
-Source: [network.go](kademlia/network.go). Kademlia uses the `Node` interface to exchange JSON RPC bytes without depending on a particular transport.
+[network.go](kademlia/network.go)
 
 ```mermaid
 flowchart TD
@@ -240,20 +285,22 @@ flowchart TD
     API --> SIM["SimulatedNode"]
     API --> UDP["UDPNode"]
     SIM --> DIAL["SimulatedNetwork.Listen / Dial"]
-    DIAL --> CONN["SimulatedConnection.Send / Recv"]
+    DIAL --> CONN["SimulatedConnection.Send / Recv<br/>Listener map protected by mutex"]
     CONN --> QUEUE["Address-indexed channels<br/>1024 messages per listener"]
     QUEUE --> PEER["Another SimulatedNode in this process"]
-    UDP --> SOCKET["net.UDPConn<br/>One datagram per SendData"]
+    QUEUE --> FULL["Full queue: return error<br/>No blocking send"]
+    SIM --> CLOSE["Close listener<br/>Unregister address and close channel"]
+    CLOSE --> STOP["Receive loop exits"]
+    UDP --> SOCKET["net.UDPConn<br/>One datagram per SendData<br/>Mutex protects connection state"]
     SOCKET --> RECEIVE["Receive copies datagram bytes<br/>64 KiB receive buffer"]
     RECEIVE --> REMOTE["Another UDPNode / process"]
     LEGACY["Legacy Network helpers<br/>PING, FIND_CONTACT, FIND_DATA, STORE text"] --> TEXT["Plain-text UDP messages<br/>Separate from JSON request/reply RPCs"]
+    TEXT --> PRINT["Standalone Listen helper<br/>1 KiB buffer; print received text"]
 ```
-
-`SimulatedNetwork` protects its listener map with a mutex. Delivery to a full queue returns an error instead of blocking. Closing a listener unregisters its address and closes its channel, allowing the receive loop to terminate. `UDPNode` binds sockets and uses read/write operations guarded by its connection-state mutex. The legacy standalone `Listen` helper has a 1 KiB buffer and prints text; the JSON RPC listener uses `UDPNode.Receive` instead.
 
 ## network.go: simulated delivery
 
-This is the same simulation used by the 1,000-node test; addresses identify in-memory listeners rather than real bound UDP ports.
+[network.go](kademlia/network.go)
 
 ```mermaid
 sequenceDiagram
@@ -263,6 +310,8 @@ sequenceDiagram
     participant Q as Node B channel
     participant B as SimulatedNode B
     participant KB as Kademlia node B
+    Note over A,Bus: Addresses identify in-memory listeners; no UDP ports are bound
+    Note over KA,KB: Same transport used by the 1000-node test
 
     B->>Bus: Listen(address B)
     Bus->>Q: Register buffered listener channel
@@ -282,10 +331,12 @@ sequenceDiagram
 
 ## routingtable.go: routing tree
 
-Source: [routingtable.go](kademlia/routingtable.go). The default branching parameter is `b=1`. Only a full leaf on the local node's prefix path may split. Leaf capacity is fixed at 20, independently of Kademlia's configurable replication factor `K`.
+[routingtable.go](kademlia/routingtable.go)
 
 ```mermaid
 flowchart TD
+    SETTINGS["Prefix tree<br/>Default b = 1<br/>20 contacts per leaf, independent of replication K"] -.-> ADD
+    LOCK["Kademlia helpers acquire routingMu<br/>RoutingTable methods do not acquire locks"] -.-> ADD
     ADD["AddContact"] --> VALID{"Contact ID present and not the local ID?"}
     VALID -->|No| IGNORE["Return without insertion"]
     VALID -->|Yes| WALK["Follow ID prefix bits from root"]
@@ -305,55 +356,55 @@ flowchart TD
     SORT --> TAKE["Return up to count contacts"]
 ```
 
-Nearest-contact queries currently collect and sort all stored contacts rather than performing a pruned nearest-neighbor tree traversal. Kademlia's routing helpers provide synchronization; `RoutingTable` itself does not acquire locks.
-
 ## bucket.go: contact recency
 
-Source: [bucket.go](kademlia/bucket.go). The front of the linked list is the most recently seen contact.
+[bucket.go](kademlia/bucket.go)
 
 ```mermaid
 flowchart TD
     CONTACT["bucket.AddContact(contact)"] --> SCAN["Search list for matching node ID"]
     SCAN --> KNOWN{"Already present?"}
-    KNOWN -->|Yes| MOVE["Move existing entry to front"]
+    KNOWN -->|Yes| MOVE["Move existing entry to front<br/>Most recently seen; stored address unchanged"]
     KNOWN -->|No| ROOM{"Fewer than 20 contacts?"}
     ROOM -->|Yes| PUSH["Insert contact at front"]
-    ROOM -->|No| DROP["Drop new contact"]
+    ROOM -->|No| DROP["Drop new contact<br/>No ping or eviction of oldest peer"]
     MOVE --> DONE["Return"]
     PUSH --> DONE
     DROP --> DONE
 ```
 
-The current bucket implementation does not ping or evict the least recently seen contact when full. Moving an existing entry updates its recency but does not replace its stored address.
-
 ## contact.go and kademliaid.go: identity and distance
 
-Sources: [contact.go](kademlia/contact.go), [kademliaid.go](kademlia/kademliaid.go), and the CLI's `hashID` helper. A `Contact` pairs a 256-bit ID with a network address and a calculated distance.
+[contact.go](kademlia/contact.go) · [kademliaid.go](kademlia/kademliaid.go) · [CLI](cmd/simshell/main.go)
 
 ```mermaid
 flowchart LR
     ADDRESS["CLI node address"] --> MATERIAL["Normalized host and port<br/>host|port"]
     MATERIAL --> HASH["SHA-256"]
+    EXP["Experiment-generated address string"] --> HASH
     HASH --> ID["KademliaID<br/>32 bytes / 64 hex characters"]
     VALUE["Stored value bytes"] --> VH["SHA-256 content key"]
     VH --> TARGET["Lookup target ID"]
-    ID --> CONTACT["Contact<br/>ID and address"]
+    HEX["Existing 64-character hex ID"] --> DECODE["NewKademliaID<br/>Validate and decode; no hashing"]
+    DECODE --> ID
+    ID --> CONTACT["Contact<br/>ID, address, calculated distance"]
     CONTACT --> XOR["CalcDistance<br/>contact ID XOR target ID"]
     TARGET --> XOR
     XOR --> COMPARE["Compare distance bytes<br/>Nearest first"]
     COMPARE --> CAND["ContactCandidates.Sort / GetContacts"]
 ```
 
-ID hashing is chosen by the caller: the CLI uses `host|port`, while the experiment helper hashes its generated address string. `NewKademliaID` validates and decodes a 64-character hex identifier; it does not hash its input.
-
 ## CLI: cmd/simshell/main.go
 
-Source: [cmd/simshell/main.go](cmd/simshell/main.go). Cobra handles both direct invocation and commands entered in the interactive shell.
+[cmd/simshell/main.go](cmd/simshell/main.go)
 
 ```mermaid
 flowchart TD
     USER["Command line or REPL input"] --> COBRA["Cobra command dispatch"]
-    COBRA --> CONFIG["configure once"]
+    REPL["REPL: strings.Fields tokenization<br/>No shell quoting for filenames with spaces"] --> COBRA
+    COBRA --> DEMO{"test command?"}
+    DEMO -->|Yes| TEST["Create own network<br/>Run Part 1 CLI demonstration"]
+    DEMO -->|No| CONFIG["configure once"]
     CONFIG --> KIND{"Transport?"}
     KIND -->|Simulated| SIM["Create shared simulation<br/>Create configured number of nodes"]
     SIM --> START["Start each RPC listener<br/>Additional nodes Join first node"]
@@ -363,18 +414,15 @@ flowchart TD
     BOOT --> COMMAND
     COMMAND -->|put / store| PUT["Read file and call Store"]
     COMMAND -->|get| GET["LookupData<br/>Print bytes or write file"]
-    COMMAND -->|ping| PING["LookupContact for target address"]
+    COMMAND -->|ping| PING["LookupContact for target address<br/>No dedicated JSON PING/PONG"]
     COMMAND -->|show| SHOW["Display routing table, data store, or nodes"]
     COMMAND -->|serve| SERVE["Keep process alive"]
-    COMMAND -->|test| TEST["Run Part 1 CLI demonstration"]
     COMMAND -->|exit / quit / EOF| CLOSE["Close local and peer transports"]
 ```
 
-The `test` command creates its own demonstration network and bypasses normal startup configuration. `ping` currently checks the contact-lookup result rather than exchanging a dedicated JSON PING/PONG RPC. The REPL tokenizes input with `strings.Fields`, so it does not interpret shell quoting for filenames containing spaces.
-
 ## Experiments: main.go and resilience.go
 
-Sources: [experiments/main.go](experiments/main.go), [experiments/resilience.go](experiments/resilience.go), and [experiment documentation](experiments/README.md).
+[experiments/main.go](experiments/main.go) · [experiments/resilience.go](experiments/resilience.go) · [Experiment documentation](experiments/README.md)
 
 ```mermaid
 flowchart TD
@@ -383,37 +431,36 @@ flowchart TD
     GRID --> BUILD["Build simulated network<br/>Seed routing knowledge"]
     BUILD --> STORE["Store seeded random values"]
     STORE --> LOOK["Run node and value lookups"]
-    LOOK --> OBS["observedNode records outbound probes"]
+    LOOK --> OBS["observedNode counts FIND_NODE / FIND_VALUE sends<br/>Delegates to network.go simulation"]
     OBS --> STATS["Aggregate success, probes, estimated hops, variance"]
     STATS --> OUTPUT["Raw CSV, summary CSV, report"]
 
     MODE -->|Yes| SCENARIO["Loss/latency, alpha, and churn/K scenarios"]
     SCENARIO --> FRESH["Fresh network for each trial"]
     FRESH --> HEALTHY["Store value under healthy conditions"]
-    HEALTHY --> CHURN["Controlled departures and empty replacement nodes"]
-    CHURN --> IMPAIR["Enable per-packet loss and one-way latency"]
+    HEALTHY --> CHURN["Simulated exposure before lookup<br/>Departures and empty replacement nodes"]
+    CHURN --> IMPAIR["impairedNode wraps simulated transport<br/>Silently drop packets or delay delivery<br/>Applies to requests and replies"]
     IMPAIR --> MEASURE["Lookup and record probes, duration, request RTT"]
     MEASURE --> RESULTS["trials.csv, requests.csv, probes.csv, report.md"]
+    STATS -.-> HOPS["Estimated hops = ceil(probes / alpha)<br/>Not measured routing path length"]
 ```
-
-The wrappers delegate to the existing `network.go` simulation. `observedNode` counts relevant FIND_NODE/FIND_VALUE sends. `impairedNode` silently drops selected packets or schedules delayed delivery, including replies. Churn is a simulated exposure between storage and lookup, not continuous node departures during the lookup. Estimated hops are `ceil(probes/alpha)`; they are not measured routing path lengths.
 
 ## Deployment and tests
 
-Sources: [docker-compose.yml](docker-compose.yml), [kademlia_test.go](kademlia/kademlia_test.go), [value_size_test.go](kademlia/value_size_test.go), and [.github/workflows/ci.yml](../.github/workflows/ci.yml).
+[docker-compose.yml](docker-compose.yml) · [kademlia_test.go](kademlia/kademlia_test.go) · [value_size_test.go](kademlia/value_size_test.go) · [CI workflow](../.github/workflows/ci.yml)
 
 ```mermaid
 flowchart LR
     subgraph Simulation["One Go process: simulation or tests"]
-        A["Kademlia instance A"]
-        B["Kademlia instance B"]
+        A["Kademlia instance A<br/>Own routing table and data store"]
+        B["Kademlia instance B<br/>Own routing table and data store"]
         MANY["Additional instances<br/>1000 total in the large-network test"]
         BUS["Shared SimulatedNetwork<br/>Address-indexed channels"]
         A <--> BUS
         B <--> BUS
         MANY <--> BUS
     end
-    subgraph Docker["Docker Swarm deployment"]
+    subgraph Docker["Docker Swarm: docker stack deploy"]
         BOOT["Bootstrap container<br/>1 replica"]
         PEERS["Peer containers<br/>49 replicas"]
         OVERLAY["Overlay network<br/>UDP RPCs"]
@@ -421,9 +468,8 @@ flowchart LR
         PEERS <--> OVERLAY
     end
     TEST["Normal test suite"] --> Simulation
+    Simulation --> RING["1000 live instances<br/>1000 request/reply exchanges<br/>Store and retrieve from non-replica"]
     TEST --> LOOPBACK["Loopback UDP tests<br/>Remote value-size round trips"]
     CI["GitHub Actions"] --> TEST
     CI --> RACE["Repeat tests with -race"]
 ```
-
-Each node owns its state; the simulation shares the transport fabric, not the routing tables or data stores. The 1,000-node test keeps all instances live, verifies a request/reply ring, then stores and retrieves a value from a non-replica. Docker's replica count is configured for `docker stack deploy`; ordinary Compose does not establish the Swarm topology described here.
