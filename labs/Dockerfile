@@ -12,4 +12,4 @@ WORKDIR /app
 
 COPY --from=builder /app/kadlab .
 
-CMD ["./kadlab", "serve"]
+CMD ["./kadlab"]
