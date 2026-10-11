@@ -372,7 +372,7 @@ func main() {
 }
 
 func parseOptions() (options, error) {
-	nodeCountsText := flag.String("node-counts", "20,50", "comma-separated network sizes")
+	nodeCountsText := flag.String("node-counts", "1000", "comma-separated network sizes")
 	alphasText := flag.String("alphas", "1,3,5", "comma-separated alpha values")
 	kValuesText := flag.String("k-values", "10", "comma-separated k values")
 	seedsText := flag.String("seeds", "1,2,3,4,5", "comma-separated RNG seeds")

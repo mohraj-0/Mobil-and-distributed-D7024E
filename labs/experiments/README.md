@@ -6,7 +6,7 @@ Run it from `labs`:
 
 ```powershell
 go run .\experiments `
-  -node-counts 20,50 `
+  -node-counts 1000 `
   -alphas 1,3,5 `
   -k-values 10 `
   -seeds 1,2,3,4,5 `
@@ -36,7 +36,7 @@ seed list, so rerunning with the same flags recreates the same experiment.
 From `labs`, run:
 
 ```powershell
-go run ./experiments -resilience -node-counts 8 -alphas 1,3,5 -k-values 1,3,5 -seeds 1,2,3 -lookups 10 -loss-rates 0,0.1,0.3 -latencies 0ms,5ms,20ms -churn-rates 0,0.1,0.5 -churn-window 1s -timeout 200ms
+go run ./experiments -resilience -node-counts 1000 -alphas 1,3,5 -k-values 1,3,5 -seeds 1,2,3 -lookups 10 -loss-rates 0,0.1,0.3 -latencies 0ms,5ms,20ms -churn-rates 0,0.1,0.5 -churn-window 1s -timeout 200ms
 ```
 
 Outputs go to `experiments/resilience` (change with `-resilience-out`):

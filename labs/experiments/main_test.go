@@ -9,8 +9,8 @@ import (
 )
 
 func TestParseLists(t *testing.T) {
-	got, err := parseIntList(" 2, 10,50 ")
-	if err != nil || !reflect.DeepEqual(got, []int{2, 10, 50}) {
+	got, err := parseIntList(" 2, 10,1000 ")
+	if err != nil || !reflect.DeepEqual(got, []int{2, 10, 1000}) {
 		t.Fatalf("parseIntList = %v, %v", got, err)
 	}
 	seeds, err := parseSeedList("-1, 2147483648")
@@ -51,12 +51,12 @@ func TestStatsAndSummary(t *testing.T) {
 		t.Fatalf("unexpected statistics: %+v", s)
 	}
 	path := filepath.Join(t.TempDir(), "nested", "summary.csv")
-	key := summaryKey{ConfigID: "n8-a3-k4", NodeCount: 8, Alpha: 3, KValue: 4, LookupType: "node"}
+	key := summaryKey{ConfigID: "n1000-a3-k4", NodeCount: 1000, Alpha: 3, KValue: 4, LookupType: "node"}
 	if err := writeSummary(path, map[summaryKey]*stats{key: &s}); err != nil {
 		t.Fatal(err)
 	}
 	rows := readCSV(t, path)
-	want := []string{"n8-a3-k4", "8", "3", "4", "node", "2", "0.5000", "3.0000", "2.0000", "2.0000", "2.0000"}
+	want := []string{"n1000-a3-k4", "1000", "3", "4", "node", "2", "0.5000", "3.0000", "2.0000", "2.0000", "2.0000"}
 	if len(rows) != 2 || !reflect.DeepEqual(rows[1], want) {
 		t.Fatalf("summary CSV = %v, want header and %v", rows, want)
 	}
