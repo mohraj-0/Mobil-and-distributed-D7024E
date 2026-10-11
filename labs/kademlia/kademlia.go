@@ -46,6 +46,13 @@ type Kademlia struct {
 	RoutingTable *RoutingTable
 	Network      Node
 
+	// OwnershipVerifier bestämmer vilken public key
+	// denna nod litar på för varje domän.
+	//
+	// Om verifieraren saknas eller inte kan hitta en giltig nyckel
+	// ska recorden avvisas.
+	OwnershipVerifier OwnershipVerifier
+
 	// Antal noder som frågas parallellt. Default är 3.
 	Alpha int
 
