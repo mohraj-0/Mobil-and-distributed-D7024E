@@ -26,11 +26,30 @@ h2{font-size:23px;margin:0 0 24px}.diagram{overflow:auto;text-align:center;paddi
 <header>
 <h1>Kademlia architecture</h1>
 <div class="legend"><span class="shell">Command shell</span><span class="logic">Kademlia logic</span><span class="sim">Simulated network</span><span class="real">Real UDP network</span><span class="data">Node state</span></div>
-<nav><a href="#view-1">1. General architecture</a><a href="#view-2">2. How Kademlia functions</a><a href="#view-3">3. How the simulated network functions</a><a href="#view-4">4. How the real UDP network functions</a><a href="#view-5">5. How the command shell starts each mode</a><a href="#view-6">6. How shell commands invoke Kademlia</a></nav>
-<p class="hint">Current implementation · Six flowcharts · Internet access is required to load the diagram renderer.</p>
+<nav><a href="#view-overview">Overview: Part 1 and Part 2</a><a href="#view-1">1. General architecture</a><a href="#view-2">2. How Kademlia functions</a><a href="#view-3">3. How the simulated network functions</a><a href="#view-4">4. How the real UDP network functions</a><a href="#view-5">5. How the command shell starts each mode</a><a href="#view-6">6. How shell commands invoke Kademlia</a></nav>
+<p class="hint">Current implementation and planned Part 2 · Seven flowcharts · Internet access is required to load the diagram renderer.</p>
 <div id="error" role="alert">The diagram renderer could not load or render. Check your internet connection, or view ARCHITECTURE.md on GitHub. Diagram source remains visible below if rendering failed.</div>
 </header>
-<main><section id="view-1" class="card"><h2>1. General architecture</h2><div class="diagram"><pre class="mermaid">flowchart TB
+<main><section id="view-overview" class="card"><h2>Overview: implemented DHT and planned package registry</h2><p class="hint">Blue blocks are implemented in Part 1; dashed orange blocks are planned for Part 2. The registry extends the existing CLI and DHT/RPC layer. See <a href="PART2-DESIGN.md">PART2-DESIGN.md</a>.</p><div class="diagram"><pre class="mermaid">flowchart TB
+    CLI[&quot;Existing CLI: put, get, show rt/ds, ping&quot;]:::current
+    CLI --&gt; DHT[&quot;Kademlia DHT and JSON RPC&lt;br/&gt;Routing, lookup, replication, request IDs, timeouts&quot;]:::current
+    DHT &lt;--&gt; DATA[&quot;Existing data store&lt;br/&gt;SHA-256(value) -&gt; bytes&quot;]:::current
+    DHT &lt;--&gt; NET[&quot;Node transport&lt;br/&gt;SimulatedNode or UDPNode -&gt; peer nodes&quot;]:::current
+
+    CLI -.-&gt; COMMANDS[&quot;Future CLI additions&lt;br/&gt;publish --force --prev, install&lt;br/&gt;show DOMAIN:PACKAGE, show dns DOMAIN&lt;br/&gt;show ds: readable records and pointers&quot;]:::future
+    COMMANDS --&gt; REGISTRY[&quot;Future package registry&lt;br/&gt;Sign publications; resolve versions and latest&quot;]:::future
+    REGISTRY &lt;--&gt; VERIFY[&quot;Future validation on receiving nodes&lt;br/&gt;Verify owner signatures and record consistency&lt;br/&gt;Reject forks, cycles, and rollback&lt;br/&gt;Fetch missing ancestors to catch up&quot;]:::future
+    VERIFY &lt;--&gt; DNS[&quot;Future ownership verifier interface&lt;br/&gt;DNS TXT or fake DNS -&gt; domain owner&#39;s public key&quot;]:::future
+    REGISTRY --&gt; IMMUTABLE[&quot;Immutable package blobs and signed version records&lt;br/&gt;Stored under their content hashes&quot;]:::future
+    VERIFY --&gt; MUTABLE[&quot;Validated mutable latest pointer&lt;br/&gt;Key = SHA-256(domain:package:latest)&lt;br/&gt;Value = signed domain, package, version, record hash&quot;]:::future
+    IMMUTABLE --&gt; DHT
+    MUTABLE -.-&gt; EXTEND[&quot;Future DHT/RPC extension&lt;br/&gt;Accept and retrieve validated mutable pointers&quot;]:::future
+    EXTEND --&gt; DHT
+    MUTABLE --&gt;|record hash| CHAIN[&quot;Latest version record -&gt; previous record -&gt; ...&lt;br/&gt;Each record -&gt; package blob by blob hash&quot;]:::future
+    IMMUTABLE --&gt; CHAIN
+
+    classDef current fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef future fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px,stroke-dasharray:5 5</pre></div><p class="hint">Part 1 checks that stored and retrieved values match their SHA-256 keys. Part 2 needs a validated mutable-pointer path in storage and lookup. Receiving nodes enforce ownership and history checks even with --force, which bypasses only publisher preflight checks. A newer head must extend the locally accepted head with strictly increasing versions; fetch and verify missing ancestors before advancing. Signature scheme, public-key TXT encoding, and version order remain implementation choices to document.</p></section><section id="view-1" class="card"><h2>1. General architecture</h2><div class="diagram"><pre class="mermaid">flowchart TB
     USER["User enters a command"]:::shell --&gt; CMD["Command shell&lt;br/&gt;Cobra / interactive REPL"]:::shell
     CMD --&gt; KADE["Kademlia logic&lt;br/&gt;Join · LookupContact · Store · LookupData"]:::logic
     subgraph STATE["Each Kademlia instance owns its state"]

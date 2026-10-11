@@ -1,5 +1,34 @@
 # Kademlia, network, and command-shell architecture
 
+## Overview: implemented DHT and planned package registry
+
+Blue blocks are implemented in Part 1; dashed orange blocks are planned for Part 2, following [PART2-DESIGN.md](PART2-DESIGN.md). The registry extends the existing CLI and DHT/RPC layer.
+
+```mermaid
+flowchart TB
+    CLI["Existing CLI: put, get, show rt/ds, ping"]:::current
+    CLI --> DHT["Kademlia DHT and JSON RPC<br/>Routing, lookup, replication, request IDs, timeouts"]:::current
+    DHT <--> DATA["Existing data store<br/>SHA-256(value) -> bytes"]:::current
+    DHT <--> NET["Node transport<br/>SimulatedNode or UDPNode -> peer nodes"]:::current
+
+    CLI -.-> COMMANDS["Future CLI additions<br/>publish --force --prev, install<br/>show DOMAIN:PACKAGE, show dns DOMAIN<br/>show ds: readable records and pointers"]:::future
+    COMMANDS --> REGISTRY["Future package registry<br/>Sign publications; resolve versions and latest"]:::future
+    REGISTRY <--> VERIFY["Future validation on receiving nodes<br/>Verify owner signatures and record consistency<br/>Reject forks, cycles, and rollback<br/>Fetch missing ancestors to catch up"]:::future
+    VERIFY <--> DNS["Future ownership verifier interface<br/>DNS TXT or fake DNS -> domain owner's public key"]:::future
+    REGISTRY --> IMMUTABLE["Immutable package blobs and signed version records<br/>Stored under their content hashes"]:::future
+    VERIFY --> MUTABLE["Validated mutable latest pointer<br/>Key = SHA-256(domain:package:latest)<br/>Value = signed domain, package, version, record hash"]:::future
+    IMMUTABLE --> DHT
+    MUTABLE -.-> EXTEND["Future DHT/RPC extension<br/>Accept and retrieve validated mutable pointers"]:::future
+    EXTEND --> DHT
+    MUTABLE -->|record hash| CHAIN["Latest version record -> previous record -> ...<br/>Each record -> package blob by blob hash"]:::future
+    IMMUTABLE --> CHAIN
+
+    classDef current fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef future fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:2px,stroke-dasharray:5 5
+```
+
+Part 1 currently requires stored values to match their SHA-256 keys, including received STORE values and retrieved data. Part 2 therefore needs an explicit validated mutable-pointer path in both storage and lookup. Receiving nodes must enforce ownership and history checks even when a publisher uses `--force`; that flag bypasses only the publisher's preflight checks. A newer head is accepted only when its verified chain extends the locally accepted head, with strictly increasing versions; missing ancestors must be fetched and checked before advancing. The signature scheme, public-key TXT encoding, and total version order remain implementation choices to document when Part 2 is built.
+
 | Color | Responsibility |
 | --- | --- |
 | Purple | Command shell: `cmd/simshell/main.go` |
