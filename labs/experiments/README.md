@@ -20,7 +20,7 @@ Outputs:
 - `experiments/lookup_summary.csv`: probe/round averages, trial variances and seed-mean variances, success rates and local-hit counts; separate remote-value summaries
 - `experiments/report.md`: generated report text explaining setup, measurement, expectations, and observed results
 - `experiments/lookup_scaling_comparison.csv`: descriptive logarithmic and linear fit coefficients, RMSE and R-squared
-- `experiments/lookup_probes_vs_n.{png,svg,pdf}`: probe and measured-round plots with seed-level error bars and logarithmic references
+- `experiments/lookup_probes_vs_n.{png,svg,pdf}`: two panels showing actual and expected probe curves for node/value lookup at alpha=3, k=10; all configurations, round measurements and uncertainty remain in the CSVs and report
 
 Raw CSV columns include:
 
@@ -51,8 +51,8 @@ launched before an early value return. Replies and publishing RPCs are excluded.
 Tests cover partial batches, late sends, source filtering, missing sends, seed
 repeatability, variance, CSV reconciliation and a communicating 1,000-node network.
 
-The plot compares observations to an anchored logarithmic growth reference and a
-descriptive log fit. The dashed reference assumes one additional discovery batch
+The plot compares observations to an anchored logarithmic growth reference.
+Descriptive log fits remain in the comparison CSV and report. The dashed reference assumes one additional discovery batch
 per doubling; it is an illustrative model, not an exact theoretical prediction.
 The report discusses expected logarithmic routing, shortlist completion cost,
 early value termination and deviations. References:

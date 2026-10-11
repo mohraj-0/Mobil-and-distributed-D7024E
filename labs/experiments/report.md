@@ -115,4 +115,6 @@ Both fits have two coefficients. They describe this finite range; neither establ
 | value | remote | 3 | 10 | probes | 0.3944 | 0.0868 | 0.9541 | 0.1142 | 0.9205 |
 | value | remote | 3 | 10 | rounds | 0.1315 | 0.0289 | 0.9541 | 0.0381 | 0.9205 |
 
-![Measured probes and rounds with logarithmic references](lookup_probes_vs_n.png)
+The simplified figure shows expected and actual probes at alpha=3, k=10 when available. Other configurations, measured rounds and uncertainty remain in the CSV tables above.
+
+![Expected and actual lookup probes](lookup_probes_vs_n.png)
