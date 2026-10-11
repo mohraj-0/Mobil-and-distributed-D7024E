@@ -120,7 +120,11 @@ func (n *scalingTransport) setTrace(trace *scalingTrace) { n.mu.Lock(); n.trace 
 func main() {
 	opts, err := parseOptions()
 	if err == nil {
-		if *packetLossMode {
+		if *timerCalibrationMode {
+			err = runTimerCalibration()
+		} else if *requestTimingMode {
+			err = runRequestTiming(opts)
+		} else if *packetLossMode {
 			err = runPacketLoss(opts)
 		} else if *resilienceMode {
 			err = runResilience(opts)

@@ -29,6 +29,9 @@ var packetLossResume = flag.Bool("packet-loss-resume", false, "reuse matching co
 type lossAttempt struct {
 	from, to, rpc                                          string
 	requestDropped, replyAttempted, replyDropped, received bool
+	started                                                time.Time
+	rtt                                                    time.Duration
+	onTime                                                 bool
 }
 
 type lossTrace struct {
@@ -37,6 +40,9 @@ type lossTrace struct {
 	loss                 float64
 	source, target, kind string
 	attempts             []*lossAttempt
+	latency              time.Duration
+	timing               bool
+	timeout              time.Duration
 }
 
 type lossPending struct {
@@ -75,6 +81,7 @@ func (n *packetLossNode) SendData(to string, payload []byte) error {
 		return n.Node.SendData(to, payload)
 	}
 	drop := false
+	var delay time.Duration
 	n.state.mu.Lock()
 	if message.Type == rpcFindNode || message.Type == rpcFindValue {
 		kind, target := "node", message.TargetID
@@ -84,6 +91,10 @@ func (n *packetLossNode) SendData(to string, payload []byte) error {
 		trace := n.state.active
 		if trace != nil && trace.source == message.SenderAddress && trace.target == target && trace.kind == kind {
 			attempt := &lossAttempt{from: message.SenderAddress, to: to, rpc: message.Type}
+			if trace.timing {
+				attempt.started = time.Now()
+				delay = trace.latency
+			}
 			attempt.requestDropped = packetDrop(trace.seed, trace.trial, kind, attempt.from, to, "request", trace.loss)
 			trace.attempts = append(trace.attempts, attempt)
 			n.state.pending[message.RequestID] = lossPending{trace, attempt}
@@ -91,6 +102,9 @@ func (n *packetLossNode) SendData(to string, payload []byte) error {
 		}
 	} else if strings.HasSuffix(message.Type, "_REPLY") {
 		if pending, ok := n.state.pending[message.RequestID]; ok {
+			if pending.trace.timing {
+				delay = pending.trace.latency
+			}
 			pending.attempt.replyAttempted = true
 			pending.attempt.replyDropped = packetDrop(pending.trace.seed, pending.trace.trial, pending.trace.kind, pending.attempt.from, pending.attempt.to, "reply", pending.trace.loss)
 			drop = pending.attempt.replyDropped
@@ -98,6 +112,11 @@ func (n *packetLossNode) SendData(to string, payload []byte) error {
 	}
 	n.state.mu.Unlock()
 	if drop {
+		return nil
+	}
+	if delay > 0 {
+		payload = append([]byte(nil), payload...)
+		time.AfterFunc(delay, func() { _ = n.Node.SendData(to, payload) })
 		return nil
 	}
 	return n.Node.SendData(to, payload)
@@ -108,6 +127,7 @@ func (n *packetLossNode) Receive() (kademlia.Message, error) {
 	if err != nil {
 		return message, err
 	}
+	receivedAt := time.Now()
 	var reply struct {
 		Type string `json:"type"`
 		ID   string `json:"request_id"`
@@ -116,6 +136,10 @@ func (n *packetLossNode) Receive() (kademlia.Message, error) {
 		n.state.mu.Lock()
 		if pending, ok := n.state.pending[reply.ID]; ok {
 			pending.attempt.received = true
+			if pending.trace.timing {
+				pending.attempt.rtt = receivedAt.Sub(pending.attempt.started)
+				pending.attempt.onTime = pending.attempt.rtt <= pending.trace.timeout
+			}
 		}
 		n.state.mu.Unlock()
 	}
@@ -129,6 +153,7 @@ type lossResult struct {
 	kind, source, target                         string
 	success, returnedContact                     bool
 	attempts                                     []lossAttempt
+	latency                                      time.Duration
 }
 
 func expectedLossSuccess(kind string, loss float64, replicas int) float64 {
@@ -140,6 +165,10 @@ func expectedLossSuccess(kind string, loss float64, replicas int) float64 {
 }
 
 func packetLossTrials(opts options, n, alpha, k int, seed int64, loss float64) ([]lossResult, error) {
+	return packetLossTrialsWithLatency(opts, n, alpha, k, seed, loss, 0, false)
+}
+
+func packetLossTrialsWithLatency(opts options, n, alpha, k int, seed int64, loss float64, latency time.Duration, timing bool) ([]lossResult, error) {
 	state := &packetLossState{pending: map[string]lossPending{}}
 	nodes, err := scalingNetworkWithTransport(n, alpha, k, opts.timeout, seed, func(node kademlia.Node) kademlia.Node { return &packetLossNode{Node: node, state: state} })
 	if err != nil {
@@ -192,7 +221,7 @@ func packetLossTrials(opts options, n, alpha, k int, seed int64, loss float64) (
 			if kind == "node" {
 				target = nodes[targets[trial]].contact.ID.String()
 			}
-			trace := &lossTrace{seed: seed, trial: trial, loss: loss, source: nodes[source].contact.Address, target: target, kind: kind}
+			trace := &lossTrace{seed: seed, trial: trial, loss: loss, source: nodes[source].contact.Address, target: target, kind: kind, latency: latency, timing: timing, timeout: opts.timeout}
 			state.mu.Lock()
 			state.active = trace
 			state.mu.Unlock()
@@ -204,7 +233,7 @@ func packetLossTrials(opts options, n, alpha, k int, seed int64, loss float64) (
 					state.mu.Lock()
 					defer state.mu.Unlock()
 					for _, a := range trace.attempts {
-						if a.to == nodes[targets[trial]].contact.Address && a.received {
+						if a.to == nodes[targets[trial]].contact.Address && a.received && (!timing || a.onTime) {
 							return returned
 						}
 					}
@@ -217,7 +246,11 @@ func packetLossTrials(opts options, n, alpha, k int, seed int64, loss float64) (
 			if err != nil {
 				return nil, err
 			}
+			if timing {
+				observeRequestDeadlines(state, trace)
+			}
 			r := lossResult{n: n, alpha: alpha, k: k, trial: trial, seed: seed, loss: loss, replicas: replicas[trial], kind: kind, source: trace.source, target: target, success: success, returnedContact: returned, probes: counts.probes, rounds: counts.rounds, elapsedMS: elapsed, expected: expectedLossSuccess(kind, loss, replicas[trial])}
+			r.latency = latency
 			state.mu.Lock()
 			for _, a := range trace.attempts {
 				r.attempts = append(r.attempts, *a)

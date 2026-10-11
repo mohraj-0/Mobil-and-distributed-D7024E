@@ -93,6 +93,42 @@ Completed seed/configuration runs are checkpointed locally. Add
 a fresh measurement. Checkpoint matching includes N, alpha, k, loss, seed, trial
 count, value size and timeout. Checkpoints are ignored by Git.
 
+## Experiment 3: Request–response time versus loss and latency
+
+Run from `labs`:
+
+```powershell
+go run ./experiments -request-timing -request-timing-resume -node-counts 1000 -alphas 3 -k-values 10 -seeds 1,2,3,4,5 -lookups 10 -loss-rates 0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1 -latencies 0ms,2ms,5ms,10ms,20ms -timing-loss-latency 5ms -timeout 50ms
+python ./experiments/plot_request_timing.py
+go run ./experiments -timer-calibration -latencies 0ms,2ms,5ms,10ms,20ms
+```
+
+This experiment has its own output directory, `experiments/request_response`,
+containing `requests.csv`, `trials.csv`, `summary.csv`, `report.md`, and PNG/SVG/PDF
+figures named `request_response_time` and `request_wait_vs_loss`. Each condition
+has 50 node and 50 remote value lookup trials across five seeds. The latency
+sweep holds loss at zero; the loss sweep holds one-way delay at 5 ms.
+
+RTT is measured with monotonic timestamps between outgoing request and incoming
+reply, matched by RPC ID. Both packet directions receive the simulated delay.
+After an early value return, launched requests are observed until their individual
+deadlines. This observation time is excluded from lookup duration. Missing replies
+have blank RTTs; late replies are marked and excluded from timely RTT averages.
+Summary rows report means, variances, seed-level uncertainty and response fractions.
+
+Expected received RTT is approximately twice one-way latency. Loss without retries
+reduces the response fraction rather than adding propagation time to received
+replies. The companion figure includes missing replies using the configured
+deadline: its ideal mean is `(1-p)^2 * 2L + (1-(1-p)^2) * timeout`, for `2L < timeout`.
+This capped request outcome metric is separate from whole-lookup duration.
+
+The plot keeps only expected and actual curves. No-response RTT means appear as
+gaps, including at complete packet loss. Matching checkpoints can be reused with
+`-request-timing-resume`; omit that flag to generate fresh measurements.
+`timer_calibration.csv` measures the delay primitive independently and appends a
+diagnostic table to the report. It helps distinguish host timer quantization from
+lookup algorithm behavior when observed RTTs exceed the ideal `2L` reference.
+
 ## Loss, latency, alpha, churn, and replication experiments
 
 From `labs`, run:

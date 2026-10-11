@@ -8,3 +8,6 @@ __pycache__/
 !/packet_loss/*.csv
 !/packet_loss/report.md
 /packet_loss/.checkpoints/
+!/request_response/*.csv
+!/request_response/report.md
+/request_response/.checkpoints/
