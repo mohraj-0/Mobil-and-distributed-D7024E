@@ -77,3 +77,11 @@ flowchart TB
 ```
 
 Publishing stores the blob and signed version record, then advances the latest pointer after validation. Installing follows the pointer and version chain to retrieve a verified blob. The DHT locates replicas, RPC matches requests with replies, and the selected transport carries messages between nodes.
+
+For LaTeX, use [the PDF diagram](system-architecture.pdf) with [the figure snippet](system-architecture.tex) and add `\usepackage{graphicx}` to your preamble. Place both files beside your main LaTeX document.
+
+The standalone [Mermaid source](system-architecture.mmd) can be rendered again from the repository root with Node.js installed:
+
+```powershell
+npx.cmd -y -p @mermaid-js/mermaid-cli@12 mmdc -i labs/system-architecture.mmd -o labs/system-architecture.pdf
+```
