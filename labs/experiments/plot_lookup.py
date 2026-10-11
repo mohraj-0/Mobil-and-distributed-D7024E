@@ -32,7 +32,9 @@ for ax, lookup_type in zip(axes, ('node', 'value')):
 axes[0].set_ylabel('Mean probes per lookup')
 axes[0].set_ylim(bottom=0)
 fig.suptitle('Experiment 1: Lookup probes versus network size')
-fig.text(0.5, 0.02, 'Source: lookup_summary.csv | 8 lookups per point | Value means include local reads (0 probes)',
+sample_counts = sorted({int(r['samples']) for r in rows})
+sample_label = '/'.join(str(count) for count in sample_counts)
+fig.text(0.5, 0.02, f'{sample_label} lookups per point | Pre-populated routing tables | Value means include local reads',
          ha='center', fontsize=9)
 fig.tight_layout(rect=(0, 0.06, 1, 0.94))
 for extension in ('png', 'svg', 'pdf'):

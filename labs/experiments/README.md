@@ -58,3 +58,26 @@ The loss/latency sweep varies all combinations of loss and delay at the first al
 Use multiple seeds and enough trials to compare success rates. Timing and concurrent packet-loss assignment vary with scheduling, even with seeded topology and random choices; the results are not byte-for-byte reproducible. Request timings include late responses received before the lookup finishes. Outstanding responses after completion are logged as missing. Results include local value hits with zero probes; account for these when interpreting value timings.
 
 Run the tests with `go test ./experiments -v`. They verify rate validation, churn exposure, complete packet loss, minimum round-trip delay, lossless value lookup, replacement of all nodes, and the actual replica count for different k values.
+
+## Reproduce the 100–1,000-node lookup sweep and resilience results
+
+The lookup sweep measures ten network sizes with 100 lookups per point
+(five seeds and 20 lookups per seed). Alpha and k retain their previous values.
+The resilience run retains its previous settings at 1,000 nodes.
+Run from `labs`:
+
+```powershell
+go run ./experiments -node-counts 100,200,300,400,500,600,700,800,900,1000 -alphas 1,3 -k-values 4 -seeds 1,2,3,4,5 -lookups 20
+go run ./experiments -resilience -node-counts 1000 -alphas 1,3 -k-values 1,3 -seeds 1,2 -lookups 2 -loss-rates 0,0.3 -latencies 0ms,3ms -churn-rates 0,0.5 -timeout 50ms
+python ./experiments/plot_lookup.py
+go test ./...
+```
+
+The plot script writes PNG, SVG, and PDF versions of `lookup_probes_vs_n`.
+Each lookup series shows ten points from 100 to 1,000 nodes. Routing tables
+are seeded with all peers, subject to bucket capacity, so this setup can flatten
+growth compared with a network formed through incremental joins. Fixed k and
+early value lookup termination also affect probe counts; growth need not be
+monotonic. This plot measures probes, not actual sequential routing hops.
+Generated CSV files and reports are ignored by Git but remain in the output
+directories described above.
