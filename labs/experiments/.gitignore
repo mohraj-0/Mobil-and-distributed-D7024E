@@ -1,2 +1,7 @@
 *.csv
 report.md
+!/lookup_raw.csv
+!/lookup_summary.csv
+!/lookup_scaling_comparison.csv
+!/report.md
+__pycache__/

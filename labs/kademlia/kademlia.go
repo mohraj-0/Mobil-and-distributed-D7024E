@@ -52,6 +52,11 @@ type Kademlia struct {
 	// Antal noder som data lagras på. Default är 10.
 	K int
 
+	// LookupBatch observes selected contacts before each lookup batch launches.
+	// Set before using the node; observers must not modify the contacts or node.
+	// Nil disables observation and leaves lookup behavior unchanged.
+	LookupBatch func([]Contact)
+
 	// Timeout för RPC.
 	RPCTimeout time.Duration
 
@@ -747,6 +752,9 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 		}
 
 		results := make(chan lookupResult, len(toQuery))
+		if kademlia.LookupBatch != nil {
+			kademlia.LookupBatch(toQuery)
+		}
 
 		// Strict parallelism.
 		for _, contact := range toQuery {
@@ -1076,6 +1084,9 @@ func (kademlia *Kademlia) lookupContactParallel(target *KademliaID, count int) [
 			queried[contact.ID.String()] = true
 		}
 
+		if kademlia.LookupBatch != nil {
+			kademlia.LookupBatch(toQuery)
+		}
 		responses := kademlia.queryContactsParallel(toQuery, target)
 
 		for _, response := range responses {

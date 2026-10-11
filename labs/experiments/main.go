@@ -307,72 +307,8 @@ func (s stats) hopVariance() float64 {
 	return s.HopM2 / float64(s.Count-1)
 }
 
-func main() {
-	opts, err := parseOptions()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if *resilienceMode {
-		if err := runResilience(opts); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	recorder, err := newLookupRecorder(opts.rawPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer recorder.close()
-
-	summaries := make(map[summaryKey]*stats)
-	for _, nodeCount := range opts.nodeCounts {
-		for _, alpha := range opts.alphas {
-			for _, kValue := range opts.kValues {
-				for _, seed := range opts.seeds {
-					configID := fmt.Sprintf("n%d-a%d-k%d", nodeCount, alpha, kValue)
-					metrics, err := runOneConfiguration(opts, recorder, configID, nodeCount, alpha, kValue, seed)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "config %s seed %d failed: %v\n", configID, seed, err)
-						os.Exit(1)
-					}
-					for _, metric := range metrics {
-						key := summaryKey{
-							ConfigID:   metric.ConfigID,
-							NodeCount:  metric.NodeCount,
-							Alpha:      metric.Alpha,
-							KValue:     metric.KValue,
-							LookupType: metric.LookupType,
-						}
-						if summaries[key] == nil {
-							summaries[key] = &stats{}
-						}
-						summaries[key].add(metric)
-					}
-				}
-			}
-		}
-	}
-
-	if err := writeSummary(opts.summaryPath, summaries); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := writeReport(opts.reportPath, opts, summaries); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("wrote raw metrics to %s\n", opts.rawPath)
-	fmt.Printf("wrote summary to %s\n", opts.summaryPath)
-	fmt.Printf("wrote report to %s\n", opts.reportPath)
-}
-
 func parseOptions() (options, error) {
-	nodeCountsText := flag.String("node-counts", "1000", "comma-separated network sizes")
+	nodeCountsText := flag.String("node-counts", "100,200,300,400,500,600,700,800,900,1000", "comma-separated network sizes")
 	alphasText := flag.String("alphas", "1,3,5", "comma-separated alpha values")
 	kValuesText := flag.String("k-values", "10", "comma-separated k values")
 	seedsText := flag.String("seeds", "1,2,3,4,5", "comma-separated RNG seeds")
@@ -434,46 +370,6 @@ func parseOptions() (options, error) {
 		summaryPath: *summaryPath,
 		reportPath:  *reportPath,
 	}, nil
-}
-
-func runOneConfiguration(opts options, recorder *lookupRecorder, configID string, nodeCount int, alpha int, kValue int, seed int64) ([]lookupMetric, error) {
-	rng := mathrand.New(mathrand.NewSource(seed))
-	nodes, err := buildRandomNetwork(nodeCount, alpha, kValue, opts.timeout, recorder, rng)
-	if err != nil {
-		return nil, err
-	}
-	defer closeNodes(nodes)
-
-	metrics := make([]lookupMetric, 0, opts.lookups*2)
-	for runIndex := 0; runIndex < opts.lookups; runIndex++ {
-		storeIndex := rng.Intn(len(nodes))
-		lookupIndex := rng.Intn(len(nodes))
-		value := randomBytes(rng, opts.valueBytes)
-
-		key, err := nodes[storeIndex].node.Store(value)
-		if err != nil {
-			return nil, fmt.Errorf("store value %d: %w", runIndex, err)
-		}
-
-		targetIndex := rng.Intn(len(nodes))
-		for targetIndex == lookupIndex && len(nodes) > 1 {
-			targetIndex = rng.Intn(len(nodes))
-		}
-		target := nodes[targetIndex].contact
-		recorder.startLookup(configID, seed, nodeCount, alpha, kValue, runIndex, "node", target.ID.String())
-		contacts := nodes[lookupIndex].node.LookupContact(&target)
-		metrics = append(metrics, recorder.finishLookup(contactFound(contacts, target), ""))
-
-		recorder.startLookup(configID, seed, nodeCount, alpha, kValue, runIndex, "value", key)
-		_, err = nodes[lookupIndex].node.LookupData(key)
-		if err != nil {
-			metrics = append(metrics, recorder.finishLookup(false, err.Error()))
-		} else {
-			metrics = append(metrics, recorder.finishLookup(true, ""))
-		}
-	}
-
-	return metrics, nil
 }
 
 func buildRandomNetwork(count int, alpha int, kValue int, timeout time.Duration, recorder *lookupRecorder, rng *mathrand.Rand) ([]experimentNode, error) {
@@ -647,69 +543,6 @@ func writeSummary(path string, summaries map[summaryKey]*stats) error {
 		}
 	}
 	return writer.Error()
-}
-
-func writeReport(path string, opts options, summaries map[summaryKey]*stats) error {
-	if err := ensureParent(path); err != nil {
-		return err
-	}
-	var builder strings.Builder
-	builder.WriteString("# Lookup Experiment Report\n\n")
-	builder.WriteString("## Experimental setup\n\n")
-	builder.WriteString(fmt.Sprintf("- Node counts: `%s`\n", intListString(opts.nodeCounts)))
-	builder.WriteString(fmt.Sprintf("- Alpha values: `%s`\n", intListString(opts.alphas)))
-	builder.WriteString(fmt.Sprintf("- K values: `%s`\n", intListString(opts.kValues)))
-	builder.WriteString(fmt.Sprintf("- Seeds: `%s`\n", seedListString(opts.seeds)))
-	builder.WriteString(fmt.Sprintf("- Random key-value pairs per seed/configuration: `%d`\n", opts.lookups))
-	builder.WriteString(fmt.Sprintf("- Value size: `%d` bytes\n", opts.valueBytes))
-	builder.WriteString("\nFor each configuration and seed, the experiment builds a fresh simulated Kademlia network. Node addresses are generated from the seeded RNG as random `IP:port` strings, and node IDs are the SHA-256 based IDs already used by the project for contacts. Values are also generated from the same seeded RNG, making every run repeatable when the same flags are used.\n\n")
-	builder.WriteString("## Measurement method\n\n")
-	builder.WriteString("The Kademlia package is not instrumented directly. Instead, the experiment wraps each simulated network node and observes outbound JSON RPC messages. A `FIND_NODE` message is counted as one node lookup probe; a `FIND_VALUE` message is counted as one value lookup probe. The implementation sends probes in strict parallel batches of size `alpha`, so hop count is estimated as `ceil(probes / alpha)`. Final success is measured from the actual public lookup result: node lookup succeeds if the target contact is returned, and value lookup succeeds if `LookupData` returns the stored value without error.\n\n")
-	builder.WriteString("These measurements are meaningful because they are taken at the transport boundary: every lookup RPC must pass through `SendData`, so counting observed `FIND_NODE` and `FIND_VALUE` messages directly measures lookup traffic rather than an internal approximation. The simulated network has no packet loss, so variance mainly reflects topology, key placement, source node choice, and parameter settings.\n\n")
-	builder.WriteString("## Expected results\n\n")
-	builder.WriteString("With larger networks, lookups may require more probes because there are more possible contacts to search. Increasing `alpha` should usually reduce measured hops because more contacts are queried per round, but it may not reduce total probes. In this codebase, routing tables are pre-populated with all contacts during the experiment setup, so node lookups often approach `k` probes: the lookup already knows many close contacts and then queries the closest shortlist. Value lookups should usually succeed in the lossless simulation because `Store` replicates to the closest known nodes.\n\n")
-	builder.WriteString("## Observed summary\n\n")
-	builder.WriteString("| config | type | samples | success rate | avg probes | probe variance | avg hops | hop variance |\n")
-	builder.WriteString("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-	for _, key := range sortedSummaryKeys(summaries) {
-		stat := summaries[key]
-		builder.WriteString(fmt.Sprintf(
-			"| %s | %s | %d | %s | %s | %s | %s | %s |\n",
-			key.ConfigID,
-			key.LookupType,
-			stat.Count,
-			formatFloat(float64(stat.Successes)/float64(stat.Count)),
-			formatFloat(stat.ProbeMean),
-			formatFloat(stat.probeVariance()),
-			formatFloat(stat.HopMean),
-			formatFloat(stat.hopVariance()),
-		))
-	}
-	builder.WriteString("\n## Discussion\n\n")
-	builder.WriteString(observedDiscussion(summaries))
-
-	return os.WriteFile(path, []byte(builder.String()), 0644)
-}
-
-func observedDiscussion(summaries map[summaryKey]*stats) string {
-	var builder strings.Builder
-	allSuccessful := true
-	for _, stat := range summaries {
-		if stat.Successes != stat.Count {
-			allSuccessful = false
-			break
-		}
-	}
-	if allSuccessful {
-		builder.WriteString("All lookups succeeded in this run. That matches the expectation for a lossless simulated network with pre-populated routing tables and replicated stored values.\n\n")
-	} else {
-		builder.WriteString("Some lookups failed. In this simulation that is not expected under healthy routing, so inspect the raw CSV for the failed configuration and check whether the lookup source sent `FIND_VALUE` probes to nodes that actually received the stored value.\n\n")
-	}
-
-	builder.WriteString("Observed node lookup probe counts are mostly controlled by `k`: because the experiment pre-populates every routing table with all other contacts, the lookup starts with a strong shortlist and mainly pays the cost of probing that shortlist. If average node probes stay flat as network size changes, that is therefore expected for this setup rather than evidence that network size has no effect in a sparse real deployment.\n\n")
-	builder.WriteString("Increasing `alpha` should reduce hop count when probe count stays similar, because the same probes are grouped into wider parallel rounds. The summary table should show this as lower average hops for larger `alpha`; deviations usually come from value lookups that finish locally or find the value early, which can produce zero or very few probes.\n\n")
-	builder.WriteString("Variance is meaningful here because each configuration is repeated across explicit seeds. Variation comes from seeded topology, random source/target choices, and random key placement. Low or zero variance means those choices did not materially change the lookup cost for that configuration, often because the fully populated routing tables make the shortlist deterministic in size.\n")
-	return builder.String()
 }
 
 func sortedSummaryKeys(summaries map[summaryKey]*stats) []summaryKey {
