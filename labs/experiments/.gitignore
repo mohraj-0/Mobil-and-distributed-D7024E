@@ -5,3 +5,6 @@ report.md
 !/lookup_scaling_comparison.csv
 !/report.md
 __pycache__/
+!/packet_loss/*.csv
+!/packet_loss/report.md
+/packet_loss/.checkpoints/

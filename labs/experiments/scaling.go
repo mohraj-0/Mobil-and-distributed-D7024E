@@ -108,10 +108,11 @@ func (n *scalingTransport) SendData(address string, payload []byte) error {
 	n.mu.RLock()
 	trace := n.trace
 	n.mu.RUnlock()
+	err := n.Node.SendData(address, payload)
 	if trace != nil {
 		trace.send(address, payload)
 	}
-	return n.Node.SendData(address, payload)
+	return err
 }
 
 func (n *scalingTransport) setTrace(trace *scalingTrace) { n.mu.Lock(); n.trace = trace; n.mu.Unlock() }
@@ -119,7 +120,9 @@ func (n *scalingTransport) setTrace(trace *scalingTrace) { n.mu.Lock(); n.trace 
 func main() {
 	opts, err := parseOptions()
 	if err == nil {
-		if *resilienceMode {
+		if *packetLossMode {
+			err = runPacketLoss(opts)
+		} else if *resilienceMode {
 			err = runResilience(opts)
 		} else {
 			err = runScaling(opts)
@@ -132,12 +135,20 @@ func main() {
 }
 
 func scalingNetwork(count, alpha, k int, timeout time.Duration, seed int64) ([]experimentNode, error) {
+	return scalingNetworkWithTransport(count, alpha, k, timeout, seed, nil)
+}
+
+func scalingNetworkWithTransport(count, alpha, k int, timeout time.Duration, seed int64, wrap func(kademlia.Node) kademlia.Node) ([]experimentNode, error) {
 	rng := mathrand.New(mathrand.NewSource(seed))
 	addresses := randomAddresses(rng, count)
 	simnet := kademlia.NewSimulatedNetwork()
 	nodes := make([]experimentNode, 0, count)
 	for _, address := range addresses {
-		transport := &scalingTransport{Node: kademlia.NewSimulatedNodeWithNetwork(simnet)}
+		var inner kademlia.Node = kademlia.NewSimulatedNodeWithNetwork(simnet)
+		if wrap != nil {
+			inner = wrap(inner)
+		}
+		transport := &scalingTransport{Node: inner}
 		if err := transport.Listen(address); err != nil {
 			closeNodes(nodes)
 			return nil, err

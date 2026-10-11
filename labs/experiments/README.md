@@ -59,6 +59,40 @@ early value termination and deviations. References:
 [original Kademlia paper](https://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia.pdf)
 and [random-ID routing analysis](https://arxiv.org/abs/1402.1191).
 
+## Experiment 2: Lookup reliability as a function of packet loss
+
+Run from `labs`:
+
+```powershell
+go run ./experiments -packet-loss -node-counts 1000 -alphas 3 -k-values 10 -seeds 1,2,3,4,5 -lookups 20 -loss-rates 0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1 -timeout 50ms
+python ./experiments/plot_packet_loss.py
+```
+
+This runs 100 node and 100 remote value lookups per loss level, using matched
+random topologies/workloads across loss settings. Publishing happens without loss
+and actual replica counts are verified before measurement. Request and reply
+packets are independently dropped; seeded masks do not depend on send order.
+Node success requires a response from the returned target. Value success requires
+the original bytes from a remote replica. Timeout and failed-contact behavior
+remain those of the real implementation.
+
+`experiments/packet_loss` contains `trials.csv`, `packets.csv`, `summary.csv`,
+`report.md`, and `lookup_reliability_vs_loss.{png,svg,pdf}`. Summary rows include
+success/probe/round/time means and variances, between-seed success variance and
+standard error. The simple two-panel figure shows only expected and actual
+success rates for node and value lookup at N=1,000, alpha=3, k=10.
+
+With packet loss p, a direct request/reply exchange succeeds with q=(1-p)^2.
+The node reference is q; the value reference is 1-(1-q)^r for r verified replicas.
+These assume direct reachability of the target/replicas. Intermediate routing
+failures and unqueried replicas can lower actual reliability. The generated report
+explains measurements, expected behavior and observed deviations.
+
+Completed seed/configuration runs are checkpointed locally. Add
+`-packet-loss-resume` to resume matching runs after an interruption; omit it for
+a fresh measurement. Checkpoint matching includes N, alpha, k, loss, seed, trial
+count, value size and timeout. Checkpoints are ignored by Git.
+
 ## Loss, latency, alpha, churn, and replication experiments
 
 From `labs`, run:
