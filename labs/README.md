@@ -28,6 +28,8 @@ We also want to introduce you to some of the tools and technologies that are com
 
 ## Testing the CLI
 
+See the [whole-system architecture](SYSTEM-ARCHITECTURE.md) for a connected view of functionality triggers, the implemented DHT/RPC layer, and the planned package registry.
+
 See the [architecture flowcharts](ARCHITECTURE.md) for Kademlia operations, simulated and real UDP networking, and command-shell startup and invocation. Open [the browser viewer](architecture.html) to view the colorful diagrams directly (internet access required).
 
 Kademlia supports values from **1 byte to 32 KiB (32,768 bytes)**. See [Kademlia value sizes](kademlia/README.md) for the enforced limits, transport details, and boundary tests.
