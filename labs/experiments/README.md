@@ -62,12 +62,13 @@ Run the tests with `go test ./experiments -v`. They verify rate validation, chur
 ## Reproduce the 100–1,000-node lookup sweep and resilience results
 
 The lookup sweep measures ten network sizes with 100 lookups per point
-(five seeds and 20 lookups per seed). Alpha and k retain their previous values.
+(five seeds and 20 lookups per seed). Alpha retains its previous values;
+k is 10, matching the lab specification's default replication factor.
 The resilience run retains its previous settings at 1,000 nodes.
 Run from `labs`:
 
 ```powershell
-go run ./experiments -node-counts 100,200,300,400,500,600,700,800,900,1000 -alphas 1,3 -k-values 4 -seeds 1,2,3,4,5 -lookups 20
+go run ./experiments -node-counts 100,200,300,400,500,600,700,800,900,1000 -alphas 1,3 -k-values 10 -seeds 1,2,3,4,5 -lookups 20
 go run ./experiments -resilience -node-counts 1000 -alphas 1,3 -k-values 1,3 -seeds 1,2 -lookups 2 -loss-rates 0,0.3 -latencies 0ms,3ms -churn-rates 0,0.5 -timeout 50ms
 python ./experiments/plot_lookup.py
 go test ./...
