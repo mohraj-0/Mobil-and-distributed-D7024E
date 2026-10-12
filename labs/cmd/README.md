@@ -76,6 +76,24 @@ split on whitespace, so use paths without spaces at the prompt.
 
 ## CLI Testing
 
+The normal test suite includes independent-replica authenticity and catch-up
+tests over `network.go`'s simulated network and loopback UDP, CLI receiver-state
+regressions, real stdin/quit subprocess tests, remote latest/historical installs,
+and tampered-blob rejection. The existing 1,000-node simulated test remains part
+of the full suite. From `labs`:
+
+```text
+go test ./...
+go test -race ./...
+go test -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
+```
+
+CI runs both full suites and enforces at least 80% aggregate module statement
+coverage, uploading test logs and the coverage profile. Detailed setup, assertions,
+coverage assessment and limitations are in the
+[implementation report](../registry/imp-report.md).
+
 The CLI can be tested in two different ways:
 
 - A simulated network, where all nodes run inside one process.

@@ -3,6 +3,119 @@
 Append an entry here for each registry addition, including behavior, affected
 files, validation, and remaining limitations.
 
+## Issue #54: end-to-end registry and CLI regression tests
+
+### What was added and why
+
+The new tests exercise complete publication, RPC acceptance, history retrieval,
+catch-up and installation paths. Client-side validation and printed acceptance
+messages alone cannot establish that another node authenticated an update or
+preserved its head. The fixtures therefore start independent node stores and
+heads, observe actual transport messages, and assert receiver snapshots alongside
+operation results. Test-only transport wrappers delegate to `network.go`'s real
+simulated network or UDP sockets; they do not synthesize successful RPC replies.
+No production acceptance policy is weakened for testing.
+
+### Remote authenticity and immutable history
+
+`kademlia/latest_e2e_test.go` starts three nodes with independent data stores and
+a shared deterministic ownership configuration. The same suite runs over the
+simulated network and real loopback UDP. Authorized publications must commit
+the signed pointer on every receiver. Publishing a later version must preserve
+the original signed record and blob bytes under their immutable keys.
+
+Forced updates test non-owner pointer signatures, a non-owner ancestor beneath
+an owner-signed successor, competing branches, rollback, same-version replacement,
+identical replay, malformed/missing ancestors, cross-package links and invalid
+version ordering. These attempts bypass sender preflight and reach both remote
+receivers. Every replica must return the expected acceptance/rejection category;
+snapshots must remain unchanged on rejection and identical replay. Counters verify
+that each remote UPDATE_LATEST was actually delivered, rather than merely checking
+client output.
+
+The cyclic-storage case models signed records at malicious, inconsistent content
+keys with predecessor links forming a cycle. SHA-256 addressed, hash-consistent
+cycles would require fixed points, so the test deliberately retains all hash
+checks and asserts rejection at the authentication gate. Existing metadata tests
+also exercise actual self-cycle/multi-record-cycle visited-set detection and
+the history traversal bound directly.
+
+### Missed updates and authenticated installs
+
+A controllable transport partition prevents one replica from sending or receiving
+while live replicas publish three more versions. Its complete snapshot must remain
+unchanged while isolated. After healing the partition, latest lookup must fetch
+remote predecessor records, commit the compatible newest head, and leave all
+replicas at that head. Tests retrieve and authenticate both original and newest
+blob bytes; the newest blob must be served by another node. This runs over both
+simulated and UDP transports.
+
+`cmd/simshell/e2e_test.go` drives the unified Cobra/interactive dispatcher with
+real publish/install/show command syntax. Forced genesis, historical-predecessor
+forks, rollback, same-version replacement, missing hash predecessors and non-owner
+signatures must cross the simulated network and preserve receiver heads. A
+duplicate CLI publication succeeds without replacing its head. Another CLI fixture
+misses three publications, then installs the authenticated latest package, displays
+all four versions, and installs the original historical bytes.
+
+The install test also corrupts real remote FIND_VALUE_REPLY blob bytes while
+preserving request correlation and the signed blob reference. Installation must
+fail specifically with an authentication error, leave an existing destination file
+untouched, and demonstrate that a remote response was actually corrupted. After
+restoring valid responses, the same install succeeds.
+
+A separate UDP CLI test uses real bootstrap/join configuration, commits publication
+on another UDP node, then starts a fresh node with an empty store and installs
+latest and historical bytes from remote serving nodes. DNS/history displays use
+the same verifier and command handlers as the simulated CLI.
+
+The subprocess regression test feeds commands to the real `main` and stdin-driven
+prompt, including Part 1 ping/put/get, Part 2 publish with force/predecessor flags,
+all show forms, latest/historical installs, an unknown package, and quit. It checks
+output and downloaded file bytes and bounds the process with a timeout. Running
+this in a child isolates stdin and exit from the test runner. Separate in-process
+tests provide the stronger receiver-state and transport assertions.
+
+### Coverage gaps and CI
+
+The pre-change module-wide statement coverage was 76.8%. Meaningful uncovered
+paths included CLI UDP setup and the Part 1 demonstration, pointer-to-record
+binding, required signed-record fields, invalid publisher key loading and the
+registry's configured pointer ownership verifier. New CLI configuration/input
+failure tests, `metadata/authenticity_test.go`, and `registry/ownership_test.go`
+exercise these paths. Signed pointer/record mismatches remain rejected even when
+both values independently have valid owner signatures.
+
+Coverage is measured across all production packages using `-coverpkg=./...`.
+This counts metadata verification called through registry aliases and CLI flows,
+rather than treating the metadata package's isolated tests as its entire usage.
+The inherited 80% target is assessed against the aggregate statement count, without
+excluding production files. Child-process main/exit behavior is checked separately;
+its coverage is not relied upon to satisfy the threshold.
+
+`.github/workflows/ci.yml` retains the full regular and race suites and adds an
+atomic module coverage profile, a coverage summary, and a failing check below 80%.
+Logs and the profile are uploaded as CI artifacts, and the coverage result appears
+in the job summary. `TestThousandNodesCommunicateOverSimulatedNetwork` remains
+unchanged in the normal suite: all 1,000 live nodes exchange real simulated RPCs
+and a non-replica retrieves stored data. No short-mode or integration-tag exclusion
+is added.
+
+### Validation and limits
+
+Final regular/race and coverage results are recorded after the completed runs.
+Local Windows test commands use `GOMAXPROCS=2` and `-p 1` to limit resource use;
+race tests use CGO with `C:\msys64\ucrt64\bin\gcc.exe`. Initial attempts hit
+sandbox build-cache access denial and Windows paging-file/ThreadSanitizer/linker
+allocation failures, which are environment failures rather than detected races.
+
+These are deterministic functional regressions on small registry networks plus
+the retained 1,000-node transport test. They do not establish consensus across
+partitions, adversarial DNS security, arbitrary-size package support, or exhaustive
+packet-loss behavior; the existing experiment suite handles larger resilience
+measurements. Loopback UDP tests require local socket access. CI configuration is
+updated locally; the hosted GitHub run occurs when these changes are pushed.
+
 ## Issue #53: one CLI for Part 1 and Part 2
 
 ### What changed and why
