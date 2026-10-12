@@ -59,10 +59,10 @@ func TestRoutingTreeSplitsBucketContainingLocalNode(t *testing.T) {
 	if rt.root.isLeaf() {
 		t.Fatal("root stayed as a leaf after the local bucket overflowed")
 	}
-	if len(rt.root.children) != 4 {
-		t.Fatalf("root has %d children, want 4 for b=2", len(rt.root.children))
+	if len(rt.root.children) != 2 {
+		t.Fatalf("root has %d children, want a binary split", len(rt.root.children))
 	}
-	if rt.root.children[3].isLeaf() {
+	if rt.root.children[1].isLeaf() {
 		t.Fatal("child containing the local node did not split after overflowing")
 	}
 
@@ -72,7 +72,7 @@ func TestRoutingTreeSplitsBucketContainingLocalNode(t *testing.T) {
 	}
 }
 
-func TestRoutingTreeDoesNotSplitBucketAwayFromLocalNode(t *testing.T) {
+func TestRoutingTreeStopsNonLocalSplittingAtMultipleOfB(t *testing.T) {
 	me := NewContact(NewKademliaID("ff00000000000000000000000000000000000000000000000000000000000000"), "localhost:8000")
 	rt := NewRoutingTableWithBranchBits(me, 2)
 
@@ -83,8 +83,11 @@ func TestRoutingTreeDoesNotSplitBucketAwayFromLocalNode(t *testing.T) {
 	if rt.root.isLeaf() {
 		t.Fatal("root stayed as a leaf after the first overflow")
 	}
-	if !rt.root.children[0].isLeaf() {
-		t.Fatal("bucket away from the local node split, but only the local subtree should split")
+	if rt.root.children[0].isLeaf() {
+		t.Fatal("non-local full bucket at depth 1 must split for b=2")
+	}
+	if !rt.root.children[0].children[0].isLeaf() {
+		t.Fatal("non-local full bucket at depth 2 must not split for b=2")
 	}
 
 	contacts := rt.FindClosestContacts(NewKademliaID("0000000000000000000000000000000000000000000000000000000000000000"), bucketSize+1)

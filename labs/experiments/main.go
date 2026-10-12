@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	mathrand "math/rand"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -506,13 +507,15 @@ func buildRandomNetwork(count int, alpha int, kValue int, timeout time.Duration,
 		})
 	}
 
-	for i := range nodes {
-		for j := range nodes {
-			if i != j {
-				nodes[i].node.RoutingTable.AddContact(nodes[j].contact)
-			}
+	for _, entry := range nodes {
+		entry.node.RoutingTable.SetCapacity(kValue)
+		go entry.node.ListenForRPC()
+	}
+	for i := 1; i < len(nodes); i++ {
+		if err := nodes[i].node.Join(nodes[0].contact); err != nil {
+			closeNodes(nodes)
+			return nil, fmt.Errorf("join node %d: %w", i, err)
 		}
-		go nodes[i].node.ListenForRPC()
 	}
 
 	return nodes, nil
@@ -562,7 +565,11 @@ func contactFound(contacts []kademlia.Contact, target kademlia.Contact) bool {
 }
 
 func hashID(text string) *kademlia.KademliaID {
-	sum := sha256.Sum256([]byte(text))
+	host, port, err := net.SplitHostPort(text)
+	if err != nil {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(host + "|" + port))
 	return kademlia.NewKademliaID(hex.EncodeToString(sum[:]))
 }
 
@@ -667,7 +674,7 @@ func writeReport(path string, opts options, summaries map[summaryKey]*stats) err
 	builder.WriteString("The Kademlia package is not instrumented directly. Instead, the experiment wraps each simulated network node and observes outbound JSON RPC messages. A `FIND_NODE` message is counted as one node lookup probe; a `FIND_VALUE` message is counted as one value lookup probe. The implementation sends probes in strict parallel batches of size `alpha`, so hop count is estimated as `ceil(probes / alpha)`. Final success is measured from the actual public lookup result: node lookup succeeds if the target contact is returned, and value lookup succeeds if `LookupData` returns the stored value without error.\n\n")
 	builder.WriteString("These measurements are meaningful because they are taken at the transport boundary: every lookup RPC must pass through `SendData`, so counting observed `FIND_NODE` and `FIND_VALUE` messages directly measures lookup traffic rather than an internal approximation. The simulated network has no packet loss, so variance mainly reflects topology, key placement, source node choice, and parameter settings.\n\n")
 	builder.WriteString("## Expected results\n\n")
-	builder.WriteString("With larger networks, lookups may require more probes because there are more possible contacts to search. Increasing `alpha` should usually reduce measured hops because more contacts are queried per round, but it may not reduce total probes. In this codebase, routing tables are pre-populated with all contacts during the experiment setup, so node lookups often approach `k` probes: the lookup already knows many close contacts and then queries the closest shortlist. Value lookups should usually succeed in the lossless simulation because `Store` replicates to the closest known nodes.\n\n")
+	builder.WriteString("With larger networks, lookups may require more probes because there are more possible contacts to search. Increasing `alpha` should usually reduce measured hops because more contacts are queried per round, but it may not reduce total probes. In this codebase, nodes join through a bootstrap using the actual joining procedure; routing tables are learned through RPCs rather than pre-populated with global membership. Expected sequential lookup rounds grow approximately as log2(N), while probe counts also reflect alpha, k and final shortlist verification. Value lookups should usually succeed in the lossless simulation because `Store` replicates to the closest known nodes.\n\n")
 	builder.WriteString("## Observed summary\n\n")
 	builder.WriteString("| config | type | samples | success rate | avg probes | probe variance | avg hops | hop variance |\n")
 	builder.WriteString("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
@@ -701,14 +708,14 @@ func observedDiscussion(summaries map[summaryKey]*stats) string {
 		}
 	}
 	if allSuccessful {
-		builder.WriteString("All lookups succeeded in this run. That matches the expectation for a lossless simulated network with pre-populated routing tables and replicated stored values.\n\n")
+		builder.WriteString("All lookups succeeded in this run. That matches the expectation for a lossless simulated network with joined routing tables and replicated stored values.\n\n")
 	} else {
 		builder.WriteString("Some lookups failed. In this simulation that is not expected under healthy routing, so inspect the raw CSV for the failed configuration and check whether the lookup source sent `FIND_VALUE` probes to nodes that actually received the stored value.\n\n")
 	}
 
 	builder.WriteString("Observed node lookup probe counts are mostly controlled by `k`: because the experiment pre-populates every routing table with all other contacts, the lookup starts with a strong shortlist and mainly pays the cost of probing that shortlist. If average node probes stay flat as network size changes, that is therefore expected for this setup rather than evidence that network size has no effect in a sparse real deployment.\n\n")
 	builder.WriteString("Increasing `alpha` should reduce hop count when probe count stays similar, because the same probes are grouped into wider parallel rounds. The summary table should show this as lower average hops for larger `alpha`; deviations usually come from value lookups that finish locally or find the value early, which can produce zero or very few probes.\n\n")
-	builder.WriteString("Variance is meaningful here because each configuration is repeated across explicit seeds. Variation comes from seeded topology, random source/target choices, and random key placement. Low or zero variance means those choices did not materially change the lookup cost for that configuration, often because the fully populated routing tables make the shortlist deterministic in size.\n")
+	builder.WriteString("Variance is meaningful here because each configuration is repeated across explicit seeds. Variation comes from seeded topology, random source/target choices, and random key placement. Low or zero variance means those choices did not materially change the lookup cost for that configuration, possibly because k and final shortlist verification dominate at the tested sizes.\n")
 	return builder.String()
 }
 
