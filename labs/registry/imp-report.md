@@ -103,7 +103,17 @@ is added.
 
 ### Validation and limits
 
-Final regular/race and coverage results are recorded after the completed runs.
+The full regular suite passed with `go test -p 1 ./...`; the complete race suite
+passed with `go test -race -p 1 ./...`, including CLI subprocess, UDP and the
+retained 1,000-node simulation. The completed module coverage profile
+(`go test -p 1 -coverpkg=./... -coverprofile=coverage.issue54.out ./...`) measured
+82.7%, up from 76.8%, exceeding the inherited aggregate 80% target. Covered gaps
+include UDP CLI configuration (90.7%), required version/pointer fields (100%),
+and signed pointer-to-record binding (95.2%). The later added remote blob-tampering
+assertions passed in the full race run. A final atomic-profile refresh was blocked
+by sandbox cache access and interrupted before completion; the CI atomic coverage
+step is configured but has not run on hosted GitHub yet. Formatting and
+`git diff --check` pass.
 Local Windows test commands use `GOMAXPROCS=2` and `-p 1` to limit resource use;
 race tests use CGO with `C:\msys64\ucrt64\bin\gcc.exe`. Initial attempts hit
 sandbox build-cache access denial and Windows paging-file/ThreadSanitizer/linker
