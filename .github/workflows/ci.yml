@@ -36,6 +36,14 @@ jobs:
           set -o pipefail
           go test -race -v ./... 2>&1 | tee go-test-race.log
 
+      - name: Measure module coverage and enforce 80 percent
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./... 2>&1 | tee go-coverage.log
+          go tool cover -func=coverage.out | tee coverage-summary.log
+          awk '/^total:/ { found=1; sub(/%$/, "", $NF); if ($NF + 0 < 80) { print "Module statement coverage is below 80%"; exit 1 } } END { if (!found) exit 1 }' coverage-summary.log
+
       - name: Publish test summary
         if: always()
         shell: bash
@@ -49,6 +57,15 @@ jobs:
               tail -n 80 go-test.log
             else
               echo "go-test.log was not created"
+            fi
+            echo '```'
+            echo
+            echo "### Module coverage (80% minimum)"
+            echo '```text'
+            if [ -f coverage-summary.log ]; then
+              tail -n 1 coverage-summary.log
+            else
+              echo "Coverage summary was not created"
             fi
             echo '```'
             echo
@@ -70,4 +87,7 @@ jobs:
           path: |
             labs/go-test.log
             labs/go-test-race.log
+            labs/go-coverage.log
+            labs/coverage-summary.log
+            labs/coverage.out
           if-no-files-found: ignore
