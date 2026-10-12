@@ -19,6 +19,7 @@ import (
 const (
 	defaultAddress   = "127.0.0.1:8000"
 	defaultTransport = "simulated"
+	defaultForce 	 = false	// enable for testing
 )
 
 type options struct {
@@ -77,6 +78,7 @@ func (s *shell) root() *cobra.Command {
 	root.PersistentFlags().IntVar(&s.opts.nodes, "nodes", 1, "number of in-process simulated nodes")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapAddr, "bootstrap-addr", envDefault("BOOTSTRAP_ADDR", ""), "bootstrap node address")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapID, "bootstrap-id", envDefault("BOOTSTRAP_ID", ""), "bootstrap node ID")
+	root.PersistentFlags().BoolVar(&s.opts.force, "force", defaultForce, "force package update")
 
 	root.AddCommand(
 		&cobra.Command{Use: "serve", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
