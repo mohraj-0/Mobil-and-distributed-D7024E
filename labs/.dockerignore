@@ -1,0 +1,10 @@
+*.key
+*.ke
+*.pkg
+*.exe
+*.out
+coverage*
+docker/.local/
+.git/
+.aws/
+.env

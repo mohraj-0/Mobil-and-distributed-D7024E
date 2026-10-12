@@ -312,3 +312,36 @@ func TestKeygenAndOwnerFileValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnershipEnvironmentAndWindowsJSON(t *testing.T) {
+	setup, _, dir := registryShell(t, 1)
+	data, err := os.ReadFile(setup.opts.ownersFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bomFile := filepath.Join(dir, "windows-owners.json")
+	if err := os.WriteFile(bomFile, append([]byte{0xef, 0xbb, 0xbf}, data...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OWNERS_FILE", bomFile)
+	t.Setenv("PUBLISHER_KEY", setup.opts.publisherKey)
+	s := &shell{}
+	out := &bytes.Buffer{}
+	s.root().SetOut(out)
+	t.Cleanup(s.close)
+	if err := s.dispatch([]string{"show", "dns", "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.opts.ownersFile != bomFile || s.opts.publisherKey != setup.opts.publisherKey || !strings.Contains(out.String(), "public-key=") {
+		t.Fatal("container ownership environment was not applied")
+	}
+	override := &shell{}
+	override.root().SetOut(&bytes.Buffer{})
+	t.Cleanup(override.close)
+	if err := override.dispatch([]string{"--owners-file", setup.opts.ownersFile, "--publisher-key", "explicit-key", "show", "dns", "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if override.opts.ownersFile != setup.opts.ownersFile || override.opts.publisherKey != "explicit-key" {
+		t.Fatal("explicit flags failed to override environment")
+	}
+}

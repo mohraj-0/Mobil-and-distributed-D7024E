@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,8 @@ func loadOwners(filename string) (kademlia.OwnershipVerifier, error) {
 		return nil, err
 	}
 	var owners map[string]string
+	// Windows PowerShell may write UTF-8 JSON with a byte-order mark.
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 	if err := json.Unmarshal(data, &owners); err != nil {
 		return nil, fmt.Errorf("owners file: %w", err)
 	}

@@ -8,6 +8,11 @@
 services:
   kademlia-bootstrap:
     image: kadlab:latest # Make sure your Docker image has this name.
+    environment:
+      OWNERS_FILE: /etc/kadlab/owners.json
+    configs:
+      - source: owners
+        target: /etc/kadlab/owners.json
     command:
       [
         "./kadlab",
@@ -32,6 +37,11 @@ services:
 
   kademlia-nodes:
     image: kadlab:latest # Make sure your Docker image has this name.
+    environment:
+      OWNERS_FILE: /etc/kadlab/owners.json
+    configs:
+      - source: owners
+        target: /etc/kadlab/owners.json
     command:
       [
         "sh",
@@ -55,6 +65,11 @@ services:
     networks:
       - kademlia_network
       
+configs:
+  owners:
+    external: true
+    name: ${KADLAB_OWNERS_CONFIG:-kadlab-owners}
+
 networks:
   kademlia_network:
     driver: overlay
