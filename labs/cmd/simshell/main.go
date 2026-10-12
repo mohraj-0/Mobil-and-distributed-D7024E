@@ -19,6 +19,7 @@ import (
 const (
 	defaultAddress   = "127.0.0.1:8000"
 	defaultTransport = "simulated"
+	defaultForce 	 = false	// enable for testing
 )
 
 type options struct {
@@ -28,6 +29,8 @@ type options struct {
 	nodes         int
 	bootstrapAddr string
 	bootstrapID   string
+	force		  bool
+	prev		  string
 }
 
 type shell struct {
@@ -75,6 +78,7 @@ func (s *shell) root() *cobra.Command {
 	root.PersistentFlags().IntVar(&s.opts.nodes, "nodes", 1, "number of in-process simulated nodes")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapAddr, "bootstrap-addr", envDefault("BOOTSTRAP_ADDR", ""), "bootstrap node address")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapID, "bootstrap-id", envDefault("BOOTSTRAP_ID", ""), "bootstrap node ID")
+	root.PersistentFlags().BoolVar(&s.opts.force, "force", defaultForce, "force package update")
 
 	root.AddCommand(
 		&cobra.Command{Use: "serve", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
@@ -84,6 +88,9 @@ func (s *shell) root() *cobra.Command {
 		&cobra.Command{Use: "ping IP:PORT", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
 			return s.ping(a[0])
 		}},
+		// &cobra.Command{Use: "install DOMAIN:PACKAGE:VERSION", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
+		// 	return s.install(a[0])
+		// }},
 		&cobra.Command{Use: "put FILENAME", Aliases: []string{"store"}, Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
 			return s.put(a[0])
 		}},
@@ -476,6 +483,17 @@ func hashID(address string) *kademlia.KademliaID {
 	}
 	return kademlia.NewKademliaID(hashHex([]byte(material)))
 }
+
+// func (s *shell) install(record string) error {
+// 	w := strings.Split(record, ":")
+// 	if len(w) != 3 {
+// 		return fmt.Errorf("install: incorrect formatting")
+// 	}
+// 	domain, pkg, version := w[0], w[1], w[2]
+//     kademlia.Install(domain, pkg, version)
+// 	return nil
+// }
+
 
 func envDefault(name string, fallback string) string {
 	value := os.Getenv(name)
