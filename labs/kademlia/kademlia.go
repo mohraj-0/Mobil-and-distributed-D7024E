@@ -49,6 +49,8 @@ type Kademlia struct {
 	pointerResponses map[string]chan rpcMessage
 	RoutingTable     *RoutingTable
 	Network          Node
+	// Each receiver resolves trusted owner keys independently of the publisher.
+	OwnershipVerifier OwnershipVerifier
 
 	// Antal noder som frågas parallellt. Default är 3.
 	Alpha int

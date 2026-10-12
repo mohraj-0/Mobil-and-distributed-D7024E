@@ -5,9 +5,10 @@ files, validation, and remaining limitations.
 
 ## Issue #48: authenticated mutable latest-pointer RPCs
 
-This branch currently keeps registry signing and DNS helpers in `kademlia`.
-There was no existing registry report or issue folder to rename, so this report
-establishes `registry/imp-report.md` as the implementation log.
+Registry storage and traversal live in `registry`. Signing, record types and DNS
+helpers live in the dependency-free `metadata` package, with shared aliases in
+`registry` and `kademlia` so receivers can authenticate pointers without creating
+an import cycle. This report is the implementation log for the pointer RPC path.
 
 ### Additions
 
@@ -95,3 +96,14 @@ regular suite passes with `GOMAXPROCS=2` and `go test -p 1 ./...`.
 The focused race run for `TestLatestTransportAndValidation` and
 `TestLookupDataRejectsCorruptedRemoteValue` also passes. `git diff --check`
 reports no whitespace errors.
+
+### CI package migration fix
+
+Integrated main's issue #47 registry migration. Its removal of the record types
+and owner-verification methods from `kademlia` caused the undefined-symbol CI
+failure. Shared `metadata` definitions and receiver-side ownership methods now
+connect the pointer transport to the migrated layout. The registry integration
+test signs a registry pointer, publishes it to two DHT replicas and reads it from
+the other replica. The full regular suite passes. The full race suite encounters
+Windows ThreadSanitizer allocation error 1455; focused pointer, corrupted-response
+and registry integration race tests pass. The integration merge is uncommitted.
