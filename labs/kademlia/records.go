@@ -60,6 +60,21 @@ type unsignedLatestPointer struct {
 	VersionRecordHash string `json:"version_record_hash"`
 }
 
+func Install(
+    registry *systemTXTResolver,
+	// registry *FakeTXTResolver
+    domain, pkg, version string,
+) error {
+	//    var record *VersionRecord
+	//
+	//    if version == "latest" {
+	// 	var latest_version = 		
+	//
+	// } 
+	return fmt.Errorf("TODO")
+}
+
+
 // SignVersionRecord signerar en VersionRecord.
 //
 // Flöde:
