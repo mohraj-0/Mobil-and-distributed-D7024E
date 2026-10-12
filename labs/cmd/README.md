@@ -1,5 +1,9 @@
 # Unified Part 1 and Part 2 CLI
 
+For the complete lab testing walkthrough, see
+[Part 1 and Part 2 commands](../COMMANDS.md), including simulated and
+50-container UDP examples, expected results, rejection cases and engineering checks.
+
 `go run ./cmd/simshell` is the single CLI for the Kademlia DHT and package
 registry. Run without a subcommand for the interactive prompt, or pass the same
 commands directly to Cobra. Both modes use the same handlers and node. For
