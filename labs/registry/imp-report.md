@@ -3,6 +3,96 @@
 Append an entry here for each registry addition, including behavior, affected
 files, validation, and remaining limitations.
 
+## Issue #53: one CLI for Part 1 and Part 2
+
+### What changed and why
+
+The existing `cmd/simshell` is the single executable and interactive shell for
+both parts. The registry APIs existed but package publication/installation were
+not active in the CLI. `main.go` now registers `publish`, `install`, package
+history and DNS ownership alongside `ping`, `put`/`store`, `get`, `show rt`,
+`show ds`, `show nodes`, `serve`, `test`, and `exit`/`quit`. No separate Part 2
+CLI is introduced. The interactive dispatcher executes the same cached Cobra
+tree as one-shot commands, preserving startup/publisher configuration rather
+than resetting flag defaults on every prompt iteration.
+
+### How the new displays work
+
+`show DOMAIN:PACKAGE` resolves the authenticated latest pointer and traverses
+the complete verified chain using the existing registry policy. Only after all
+records verify does it print newest-first versions, abbreviated record hashes,
+blob references and predecessor hashes, labeling the zero predecessor genesis.
+Unknown packages and failed verification return contextual errors without
+printing a partial trusted history. Existing lookup catch-up and read repair
+remain active when history is resolved.
+
+`show dns DOMAIN` calls that node's actual ownership verifier and prints the
+full Ed25519 public key. Missing verifiers, absent ownership and DNS lookup/key
+errors are reported clearly. CLI nodes now configure real DNS TXT ownership by
+default. An optional `--owners-file` JSON domain-to-public-key map creates a
+shared fake DNS provider for all in-process replicas, validated before listeners
+start. This supports reproducible demonstrations without trusting a key supplied
+in a package update.
+
+`show ds` copies the synchronized `DataSnapshot`, sorts keys and decodes tagged
+metadata outside the store lock. Blobs show key/size; version records show
+namespace/version/blob/predecessor; latest pointers show namespace/version/record
+reference. Malformed tagged records or incorrect key mappings are marked, and
+short malformed keys cannot panic the abbreviation helper. This is local
+diagnostic inspection rather than ownership authentication, keeping it useful
+even when DNS is unavailable. Package-history output performs full verification.
+Show handlers use Cobra's output writer, allowing deterministic output tests.
+
+### Integrated publication and installation
+
+`publish` loads a hex Ed25519 private key from `--publisher-key FILE`, checks DNS
+ownership, resolves the current verified history, selects the current predecessor
+by default, and requires an increasing positive integer version. `--prev` selects
+an explicit published version (`0` means genesis). Validated blob and signed
+record storage use the registry API; signed latest publication uses the existing
+authenticated replica RPCs and prints each replica's result.
+
+`--force` bypasses publisher ownership/version/ancestry preflight and stores the
+signed immutable record directly, then calls `PublishLatestForced`. This small
+transport entry point skips sender history preflight only: local and remote
+replicas still run the exact same authenticated update validation. Therefore
+forced rollback, fork, or unavailable-predecessor attempts can reach receivers
+without weakening their acceptance rules. A forced explicit predecessor may
+also be a record hash. Publication force/predecessor flags reset after each
+command so they do not leak into later interactive publications.
+
+`install` finds the requested integer version or `latest` in verified history,
+fetches and hash-checks the selected blob, then writes `PACKAGE-VERSION.pkg` or
+`--output FILE` and prints the serving node. Older immutable releases remain
+available. The optional `keygen FILE` helper creates a private key locally with
+exclusive file creation and prints its public DNS TXT value. Private key bytes
+are never printed or sent to replicas.
+
+### Tests, validation, and limits
+
+`cmd/simshell/registry_test.go` exercises a three-node publication/history/install
+flow, first/multiple versions and newest-first output, structured display types,
+DNS keys and unknown owners/packages, malformed records, rejected forced forks,
+publisher preflight and per-command flag reset, historical binary downloads,
+direct Cobra and interactive dispatch, existing Part 1 commands, key generation
+and ownership-file validation. Concurrent storage and repeated `show ds` calls
+exercise snapshot safety under the race detector. Existing history tests retain
+the full cryptographic and ancestry rejection coverage.
+
+Validation passed from `labs`: `GOMAXPROCS=2 go test -p 1 ./...` and
+`go test -race -p 1 ./cmd/simshell ./kademlia ./metadata ./registry` with CGO
+and `C:\msys64\ucrt64\bin\gcc.exe` on Windows. The CLI race suite was rerun
+after adding reset coverage for publication flags following argument errors.
+`gofmt` and `git diff --check` also passed.
+
+The CLI uses the existing in-memory DHT and 32,768-byte value limit. Installs
+save verified package bytes, without executing packages or dependency resolution.
+Interactive paths still use whitespace splitting. Configure ownership/transport
+flags at startup; one-shot simulated networks do not persist between commands.
+Real DNS has the existing trust and key-rotation limitations. Updated command
+examples and setup are documented in `cmd/README.md` and linked from the registry
+README.
+
 ## Issue #50: stale-node catch-up and latest-pointer repair
 
 ### What changed and why

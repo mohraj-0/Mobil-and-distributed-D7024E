@@ -3,12 +3,12 @@
 Part 2 code lives in `d7024e/registry`: signed record types, Ed25519
 signing/verification, real and fake DNS ownership, publisher key helpers, and
 immutable storage/history operations. Kademlia handles content-addressed bytes
-and has no dependency on registry metadata.
+and uses shared `metadata` types for authenticated mutable latest-pointer RPCs.
 
 Create `Registry{Store: node, OwnershipVerifier: verifier}` where `node` is a
 `*kademlia.Kademlia` and `verifier` is a `DNSOwnershipVerifier`. The existing
 Part 2 helpers previously exported from `kademlia` now belong to `registry`;
-ownership configuration belongs to `Registry`.
+use the same ownership verifier on `Registry` and `Kademlia`.
 
 1. `StoreBlob(bytes)` stores binary package bytes and returns SHA-256 hex.
 2. Build and sign a `VersionRecord` using `SignVersionRecord`. Use `ZeroHash`
@@ -41,7 +41,9 @@ Authenticating history does not fetch every historical blob; a download checks
 the selected blob's availability and hash separately.
 
 Mutable latest-pointer RPCs, atomic publication/fork prevention, catch-up and
-the Part 2 CLI are subsequent issues. Signed pointer helpers already exist,
-but this package does not yet publish mutable pointers.
+read repair live in `kademlia/latest.go`. The single Part 1/Part 2 CLI lives in
+`cmd/simshell`: `publish`, `install`, package history, DNS ownership, and structured
+data-store inspection share the existing DHT commands and interactive dispatch.
+See [CLI usage and demonstrations](../cmd/README.md).
 
 Run from `labs`: `go test ./registry` and `go test -race ./...`.

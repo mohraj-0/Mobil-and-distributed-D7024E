@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sort"
@@ -24,25 +25,28 @@ const (
 )
 
 type options struct {
-	alpha, k             int
-	branchBits           int
-	replication, refresh time.Duration
-	transport            string
-	addr                 string
-	listenAddr           string
-	nodes                int
-	bootstrapAddr        string
-	bootstrapID          string
-	force                bool
-	prev                 string
+	alpha, k                 int
+	branchBits               int
+	replication, refresh     time.Duration
+	transport                string
+	addr                     string
+	listenAddr               string
+	nodes                    int
+	bootstrapAddr            string
+	bootstrapID              string
+	force                    bool
+	prev                     string
+	publisherKey, ownersFile string
 }
 
 type shell struct {
-	opts    options
-	node    *kademlia.Kademlia
-	contact kademlia.Contact
-	network kademlia.Node
-	peers   []*kademlia.Kademlia
+	opts     options
+	node     *kademlia.Kademlia
+	contact  kademlia.Contact
+	network  kademlia.Node
+	peers    []*kademlia.Kademlia
+	command  *cobra.Command
+	verifier kademlia.OwnershipVerifier
 }
 
 func main() {
@@ -57,12 +61,15 @@ func main() {
 }
 
 func (s *shell) root() *cobra.Command {
+	if s.command != nil {
+		return s.command
+	}
 	root := &cobra.Command{
 		Use:           "simshell",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if cmd.Name() == "help" || isCommandOrParent(cmd, "test") {
+			if cmd.Name() == "help" || cmd.Name() == "keygen" || isCommandOrParent(cmd, "test") {
 				return nil
 			}
 			return s.configure()
@@ -87,7 +94,8 @@ func (s *shell) root() *cobra.Command {
 	root.PersistentFlags().IntVar(&s.opts.nodes, "nodes", 1, "number of in-process simulated nodes")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapAddr, "bootstrap-addr", envDefault("BOOTSTRAP_ADDR", ""), "bootstrap node address")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapID, "bootstrap-id", envDefault("BOOTSTRAP_ID", ""), "bootstrap node ID")
-	root.PersistentFlags().BoolVar(&s.opts.force, "force", defaultForce, "force package update")
+	root.PersistentFlags().StringVar(&s.opts.publisherKey, "publisher-key", "", "local hex Ed25519 private-key file for publish")
+	root.PersistentFlags().StringVar(&s.opts.ownersFile, "owners-file", "", "fake DNS JSON map of domains to public-key hex; default: real DNS TXT")
 
 	root.AddCommand(
 		&cobra.Command{Use: "serve", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
@@ -97,9 +105,9 @@ func (s *shell) root() *cobra.Command {
 		&cobra.Command{Use: "ping IP:PORT", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
 			return s.ping(a[0])
 		}},
-		// &cobra.Command{Use: "install DOMAIN:PACKAGE:VERSION", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
-		// 	return s.install(a[0])
-		// }},
+		s.publishCmd(),
+		s.installCmd(),
+		keygenCmd(),
 		&cobra.Command{Use: "put FILENAME", Aliases: []string{"store"}, Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
 			return s.put(a[0])
 		}},
@@ -117,6 +125,7 @@ func (s *shell) root() *cobra.Command {
 			os.Exit(0)
 		}},
 	)
+	s.command = root
 	return root
 }
 
@@ -145,6 +154,11 @@ func (s *shell) configure() error {
 	if s.opts.branchBits < 0 || s.opts.branchBits > 256 || s.opts.alpha < 0 || s.opts.k < 0 || s.opts.replication < 0 || s.opts.refresh < 0 {
 		return fmt.Errorf("invalid Kademlia parameters")
 	}
+	verifier, err := loadOwners(s.opts.ownersFile)
+	if err != nil {
+		return err
+	}
+	s.verifier = verifier
 
 	switch strings.ToLower(s.opts.transport) {
 	case "simulated", "sim":
@@ -172,6 +186,7 @@ func (s *shell) configureSimulated() error {
 		if s.opts.alpha > 0 {
 			node.Alpha = s.opts.alpha
 		}
+		node.OwnershipVerifier = s.verifier
 		if s.opts.k > 0 {
 			node.K = s.opts.k
 		}
@@ -216,6 +231,7 @@ func (s *shell) configureUDP() error {
 	s.node = node
 	s.contact = contact
 	s.network = transport
+	node.OwnershipVerifier = s.verifier
 	if s.opts.alpha > 0 {
 		node.Alpha = s.opts.alpha
 	}
@@ -289,25 +305,54 @@ func (s *shell) repl() {
 		if len(args) == 0 {
 			continue
 		}
-		cmd := s.root()
-		cmd.SetArgs(args)
-		if err := cmd.Execute(); err != nil {
+		if err := s.dispatch(args); err != nil {
 			fmt.Println(err)
 		}
 	}
 }
 
+// The interactive shell executes the same Cobra tree as one-shot commands.
+func (s *shell) dispatch(args []string) error {
+	cmd := s.root()
+	defer func() {
+		// Parsing/argument errors can happen before RunE resets command flags.
+		// Preserve startup flags, but never carry publication or output flags
+		// into the next interactive command after a failed invocation.
+		for _, child := range cmd.Commands() {
+			var names []string
+			switch child.Name() {
+			case "publish":
+				names = []string{"force", "prev"}
+			case "install":
+				names = []string{"output"}
+			}
+			for _, name := range names {
+				flag := child.Flags().Lookup(name)
+				_ = flag.Value.Set(flag.DefValue)
+				flag.Changed = false
+			}
+		}
+	}()
+	cmd.SetArgs(args)
+	return cmd.Execute()
+}
+
 func (s *shell) showCmd() *cobra.Command {
-	show := &cobra.Command{Use: "show", Args: cobra.NoArgs}
+	show := &cobra.Command{Use: "show DOMAIN:PACKAGE", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, a []string) error {
+		return s.showHistory(cmd.OutOrStdout(), a[0])
+	}}
 	show.AddCommand(
-		&cobra.Command{Use: "rt", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
-			return s.show("rt")
+		&cobra.Command{Use: "rt", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+			return s.showTo(cmd.OutOrStdout(), "rt")
 		}},
-		&cobra.Command{Use: "ds", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
-			return s.show("ds")
+		&cobra.Command{Use: "ds", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+			return s.showTo(cmd.OutOrStdout(), "ds")
 		}},
-		&cobra.Command{Use: "nodes", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
-			return s.show("nodes")
+		&cobra.Command{Use: "nodes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+			return s.showTo(cmd.OutOrStdout(), "nodes")
+		}},
+		&cobra.Command{Use: "dns DOMAIN", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, a []string) error {
+			return s.showDNS(cmd.OutOrStdout(), a[0])
 		}},
 	)
 	return show
@@ -470,6 +515,10 @@ func (s *shell) get(key string, filename string) error {
 }
 
 func (s *shell) show(what string) error {
+	return s.showTo(os.Stdout, what)
+}
+
+func (s *shell) showTo(out io.Writer, what string) error {
 	switch what {
 	case "rt":
 		buckets := s.node.RoutingTable.Snapshot()
@@ -480,31 +529,36 @@ func (s *shell) show(what string) error {
 		sort.Ints(indices)
 		for _, index := range indices {
 			contacts := buckets[index]
-			fmt.Printf("bucket %d: %d contacts\n", index, len(contacts))
+			fmt.Fprintf(out, "bucket %d: %d contacts\n", index, len(contacts))
 			for _, contact := range contacts {
-				fmt.Printf("  %s %s\n", shortID(contact.ID), contact.Address)
+				fmt.Fprintf(out, "  %s %s\n", shortID(contact.ID), contact.Address)
 			}
 		}
 		if len(buckets) == 0 {
-			fmt.Println("routing table is empty")
+			fmt.Fprintln(out, "routing table is empty")
 		}
 	case "ds":
 		dataStore := s.node.DataSnapshot()
 		if len(dataStore) == 0 {
-			fmt.Println("data store is empty")
+			fmt.Fprintln(out, "data store is empty")
 			return nil
 		}
-		for key, data := range dataStore {
-			fmt.Printf("%s bytes=%d\n", shortKey(key), len(data))
+		keys := make([]string, 0, len(dataStore))
+		for key := range dataStore {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			displayStoredValue(out, key, dataStore[key])
 		}
 	case "nodes":
 		if len(s.peers) == 0 {
-			fmt.Printf("%s %s\n", shortID(s.contact.ID), s.contact.Address)
+			fmt.Fprintf(out, "%s %s\n", shortID(s.contact.ID), s.contact.Address)
 			return nil
 		}
 		for _, node := range s.peers {
 			contact := node.RoutingTable.Me()
-			fmt.Printf("%s %s\n", shortID(contact.ID), contact.Address)
+			fmt.Fprintf(out, "%s %s\n", shortID(contact.ID), contact.Address)
 		}
 	default:
 		return fmt.Errorf("usage: show rt|ds|nodes")
@@ -535,16 +589,6 @@ func hashID(address string) *kademlia.KademliaID {
 	}
 	return kademlia.NewKademliaID(hashHex([]byte(material)))
 }
-
-// func (s *shell) install(record string) error {
-// 	w := strings.Split(record, ":")
-// 	if len(w) != 3 {
-// 		return fmt.Errorf("install: incorrect formatting")
-// 	}
-// 	domain, pkg, version := w[0], w[1], w[2]
-//     kademlia.Install(domain, pkg, version)
-// 	return nil
-// }
 
 func envDefault(name string, fallback string) string {
 	value := os.Getenv(name)
@@ -622,5 +666,8 @@ func shortID(id *kademlia.KademliaID) string {
 }
 
 func shortKey(key string) string {
+	if len(key) <= 12 {
+		return key
+	}
 	return key[:4] + "..." + key[len(key)-4:]
 }
