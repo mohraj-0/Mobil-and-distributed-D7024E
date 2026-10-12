@@ -250,13 +250,28 @@ func (n *Kademlia) latestPeers(key string) []Contact {
 
 // PublishLatest returns a result for every selected replica, including rejections.
 func (n *Kademlia) PublishLatest(p LatestPointer) (map[string]error, error) {
+	return n.publishLatest(p, false)
+}
+
+// PublishLatestForced skips sender preflight for CLI demonstrations. Every
+// replica, including this node, still uses the authenticated acceptance path.
+func (n *Kademlia) PublishLatestForced(p LatestPointer) (map[string]error, error) {
+	return n.publishLatest(p, true)
+}
+
+func (n *Kademlia) publishLatest(p LatestPointer, force bool) (map[string]error, error) {
 	value, err := json.Marshal(p)
 	if err != nil {
 		return nil, err
 	}
 	key := LatestKey(p.Domain, p.Package)
-	if _, _, err = n.verifyLatest(key, value); err != nil {
-		return nil, err
+	if !force {
+		if _, _, err = n.verifyLatest(key, value); err != nil {
+			return nil, err
+		}
+	}
+	if !canonicalNamespace(p.Domain, p.Package) {
+		return nil, latestError("malformed", "invalid namespace")
 	}
 	if n.RoutingTable == nil || n.Network == nil {
 		return nil, latestError("transport", "node is not initialized")

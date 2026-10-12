@@ -1,4 +1,80 @@
-# CLI Testing
+# Unified Part 1 and Part 2 CLI
+
+`go run ./cmd/simshell` is the single CLI for the Kademlia DHT and package
+registry. Run without a subcommand for the interactive prompt, or pass the same
+commands directly to Cobra. Both modes use the same handlers and node. For
+registry demonstrations, use the interactive prompt so the in-memory simulated
+network survives between publications. One-shot commands can also join a running
+UDP network using the existing bootstrap flags.
+
+```text
+ping IP:PORT
+put FILENAME                 (alias: store)
+get KEY [FILENAME]
+show rt
+show ds
+show nodes
+publish [--force] [--prev=VERSION] DOMAIN:PACKAGE:VERSION FILENAME
+install DOMAIN:PACKAGE:VERSION [--output FILE]
+show DOMAIN:PACKAGE
+show dns DOMAIN
+exit                         (alias: quit)
+```
+
+Versions are positive integers; `install` also accepts `latest`. History output
+is verified and newest first, showing abbreviated record/blob hashes and
+predecessors (`genesis` for the first record). `show ds` prints sorted local
+snapshot entries as blobs, version records, or latest pointers. It is a diagnostic
+decode, not proof of ownership; malformed tagged records are marked explicitly.
+`show dns` prints the full owner public key from the node's configured verifier,
+or reports a missing owner/lookup failure.
+
+For real DNS, publish a TXT record `d7024e-ed25519=PUBLIC_KEY_HEX` on your domain.
+Generate a signing key with `go run ./cmd/simshell keygen publisher.key`; it prints
+only the public DNS TXT value and refuses to overwrite an existing key file.
+Launch with `--publisher-key publisher.key` to sign publications. Private keys
+stay local and are never sent through the DHT.
+
+For a repeatable simulated demonstration, create a JSON owners file such as
+`{"example.com":"PUBLIC_KEY_HEX"}` using that printed public key, then run:
+
+```powershell
+go run ./cmd/simshell --nodes 3 --owners-file owners.json --publisher-key publisher.key
+```
+
+All three nodes use the same fake DNS ownership file. At the prompt:
+
+```text
+show dns example.com
+publish example.com:demo:1 go.mod
+publish example.com:demo:2 go.mod
+show example.com:demo
+show ds
+install example.com:demo:1 --output demo-first.pkg
+install example.com:demo:latest
+publish --force --prev=0 example.com:demo:3 go.mod
+show example.com:demo
+show rt
+show nodes
+exit
+```
+
+The forced competing genesis is rejected by receivers. Without `--force`, the
+publisher checks ownership, increasing version, and extension of the latest head
+before uploading. `--prev` selects a published predecessor version; `0` selects
+genesis. With `--force`, a 64-character record hash may also be supplied to test
+missing/invalid ancestry. Force bypasses sender preflight, while every receiving
+node retains authenticated update validation. Replica acceptance/rejection is
+printed individually. Publication flags apply only to the current command.
+`install` verifies history and the selected blob before writing
+`PACKAGE-VERSION.pkg` or the explicit `--output` destination.
+
+Ownership and transport flags configure nodes at startup. Data remains in memory,
+package size remains limited to 32,768 bytes, and installs retrieve package bytes
+rather than running an installer or resolving dependencies. Interactive input is
+split on whitespace, so use paths without spaces at the prompt.
+
+## CLI Testing
 
 The CLI can be tested in two different ways:
 
