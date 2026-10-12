@@ -527,8 +527,9 @@ func TestLookupDataRejectsCorruptedRemoteValue(t *testing.T) {
 	if replies.Load() != 1 {
 		t.Fatalf("corrupted replies sent = %d, want 1; lookup error: %v", replies.Load(), err)
 	}
-	if err.Error() != "value not found" {
-		t.Fatalf("LookupData error = %v, want value not found after rejecting corruption", err)
+	var failure *LatestError
+	if !errors.As(err, &failure) || failure.Status != "authentication" {
+		t.Fatalf("LookupData error = %v, want authentication failure after rejecting corruption", err)
 	}
 	if _, cached := node.DataStore[key.String()]; cached {
 		t.Fatal("LookupData cached the corrupted value")
