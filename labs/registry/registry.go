@@ -7,10 +7,11 @@ import (
 	"fmt"
 
 	"d7024e/kademlia"
+	"d7024e/metadata"
 )
 
-const ZeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
-const DefaultMaxHistory = 1024
+const ZeroHash = metadata.ZeroHash
+const DefaultMaxHistory = metadata.DefaultMaxHistory
 
 // ContentStore is implemented by *kademlia.Kademlia. Registry metadata remains
 // separate from the transport and uses the existing content-addressed path.
@@ -26,10 +27,7 @@ type Registry struct {
 	MaxHistory int
 }
 
-type HistoryEntry struct {
-	Hash   string
-	Record VersionRecord
-}
+type HistoryEntry = metadata.HistoryEntry
 
 func contentHash(data []byte) string {
 	sum := sha256.Sum256(data)
@@ -149,14 +147,7 @@ func (r *Registry) historyLimit() int {
 }
 
 func visitHistoryHash(visited map[string]bool, hash string, limit int) error {
-	if visited[hash] {
-		return fmt.Errorf("cycle in history at %s", hash)
-	}
-	if len(visited) >= limit {
-		return fmt.Errorf("history exceeds traversal limit %d", limit)
-	}
-	visited[hash] = true
-	return nil
+	return metadata.VisitHistoryHash(visited, hash, limit)
 }
 
 // TraverseHistory returns newest first, and returns no partial authenticated
@@ -171,39 +162,9 @@ func (r *Registry) TraverseHistory(head, domain, pkg string) ([]HistoryEntry, er
 	if !validHash(head) || head == ZeroHash {
 		return nil, fmt.Errorf("invalid history head")
 	}
-	visited := make(map[string]bool)
-	history := []HistoryEntry{}
-	for hash := head; hash != ZeroHash; {
-		if err := visitHistoryHash(visited, hash, r.historyLimit()); err != nil {
-			return nil, err
-		}
-		data, err := r.fetch("version record", hash)
-		if err != nil {
-			return nil, err
-		}
-		var record VersionRecord
-		if err := json.Unmarshal(data, &record); err != nil {
-			return nil, fmt.Errorf("decode version record %s: %w", hash, err)
-		}
-		if record.Domain != domain || record.Package != pkg {
-			return nil, fmt.Errorf("cross-domain/package history link at %s", hash)
-		}
-		if err := r.VerifyOwnedVersionRecord(&record); err != nil {
-			return nil, fmt.Errorf("authenticate record %s: %w", hash, err)
-		}
-		if err := validateReferences(&record); err != nil {
-			return nil, fmt.Errorf("record %s: %w", hash, err)
-		}
-		if visited[record.PreviousVersionRecord] {
-			return nil, fmt.Errorf("cycle in history at %s", record.PreviousVersionRecord)
-		}
-		if len(history) > 0 && record.Version >= history[len(history)-1].Record.Version {
-			return nil, fmt.Errorf("history versions must strictly increase")
-		}
-		history = append(history, HistoryEntry{Hash: hash, Record: record})
-		hash = record.PreviousVersionRecord
-	}
-	return history, nil
+	return metadata.TraverseHistory(head, domain, pkg, r.historyLimit(), func(hash string) ([]byte, error) {
+		return r.fetch("version record", hash)
+	}, r.VerifyOwnedVersionRecord)
 }
 
 // ResolveVersionRecord authenticates the requested record and its entire ancestry.

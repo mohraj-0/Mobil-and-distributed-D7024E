@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
+
+	"d7024e/metadata"
 )
 
 // LatestError preserves machine-readable rejection reasons across transports.
@@ -35,54 +38,75 @@ func (n *Kademlia) verifyLatest(key string, value []byte) (LatestPointer, []stri
 	if err := n.VerifyOwnedLatestPointer(&p); err != nil {
 		return p, nil, latestError("authentication", err.Error())
 	}
-	hashes := []string{}
-	seen := map[string]bool{}
-	hash := p.VersionRecordHash
-	version := p.Version
-	for hash != strings.Repeat("0", 64) {
-		if !validHash(hash) || seen[hash] || len(hashes) >= 1024 {
-			return p, nil, latestError("conflict", "invalid or cyclic ancestry")
+	history, err := metadata.TraverseHistory(p.VersionRecordHash, p.Domain, p.Package, metadata.DefaultMaxHistory, n.LookupData, n.VerifyOwnedVersionRecord)
+	if err != nil {
+		var transport *LatestError
+		if errors.As(err, &transport) {
+			return p, nil, transport
 		}
-		seen[hash] = true
-		value, err := n.LookupData(hash)
-		if err != nil {
-			var failure *LatestError
-			if errors.As(err, &failure) {
-				return p, nil, failure
-			}
-			return p, nil, latestError("missing_data", err.Error())
+		var failure *metadata.HistoryError
+		if errors.As(err, &failure) {
+			return p, nil, latestError(failure.Status, failure.Error())
 		}
-		if hashValue(value) != hash {
-			return p, nil, latestError("authentication", "record hash mismatch")
-		}
-		var r VersionRecord
-		if json.Unmarshal(value, &r) != nil {
-			return p, nil, latestError("malformed", "invalid version record")
-		}
-		if err := n.VerifyOwnedVersionRecord(&r); err != nil {
-			return p, nil, latestError("authentication", err.Error())
-		}
-		if r.Domain != p.Domain || r.Package != p.Package || !validHash(r.BlobHash) || (len(hashes) == 0 && r.Version != p.Version) || (len(hashes) > 0 && r.Version >= version) {
-			return p, nil, latestError("conflict", "record metadata or version ordering mismatch")
-		}
-		hashes = append(hashes, hash)
-		version = r.Version
-		hash = r.PreviousVersionRecord
+		return p, nil, err
 	}
-	if len(hashes) == 0 {
-		return p, nil, latestError("conflict", "pointer references genesis sentinel")
+	if history[0].Record.Version != p.Version {
+		return p, nil, latestError("conflict", "pointer version does not match referenced record")
+	}
+	hashes := make([]string, len(history))
+	for i, entry := range history {
+		hashes[i] = entry.Hash
 	}
 	return p, hashes, nil
 }
 
+type latestPackageLock struct {
+	mu    sync.Mutex
+	users int
+}
+
+// Keep one lock for each in-flight package, removing it after the last waiter.
+// Taking a reference before waiting prevents two locks for the same package.
+func (n *Kademlia) lockLatestPackage(key string) func() {
+	n.pointerMu.Lock()
+	if n.pointerLocks == nil {
+		n.pointerLocks = make(map[string]*latestPackageLock)
+	}
+	lock := n.pointerLocks[key]
+	if lock == nil {
+		lock = &latestPackageLock{}
+		n.pointerLocks[key] = lock
+	}
+	lock.users++
+	n.pointerMu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		n.pointerMu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(n.pointerLocks, key)
+		}
+		n.pointerMu.Unlock()
+	}
+}
+
 // acceptLatest serializes final head checks after potentially slow record fetches.
 func (n *Kademlia) acceptLatest(key string, value []byte) error {
+	// Own the bytes so the value committed is exactly the value authenticated.
+	value = append([]byte(nil), value...)
 	p, history, err := n.verifyLatest(key, value)
 	if err != nil {
 		return err
 	}
-	n.pointerMu.Lock()
-	defer n.pointerMu.Unlock()
+	return n.commitLatest(key, value, p, history)
+}
+
+// Only authenticated histories reach this function. The current head is read
+// again inside the package lock, never taken from an earlier fetch snapshot.
+func (n *Kademlia) commitLatest(key string, value []byte, p LatestPointer, history []string) error {
+	unlock := n.lockLatestPackage(key)
+	defer unlock()
 	n.ensureDataStore()
 	n.dataMu.Lock()
 	defer n.dataMu.Unlock()

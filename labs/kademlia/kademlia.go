@@ -45,6 +45,7 @@ const (
 // Kademlia innehåller logiken för en lokal Kademlia-nod.
 type Kademlia struct {
 	pointerMu        sync.Mutex
+	pointerLocks     map[string]*latestPackageLock
 	pointerRPCMu     sync.Mutex
 	pointerResponses map[string]chan rpcMessage
 	RoutingTable     *RoutingTable
