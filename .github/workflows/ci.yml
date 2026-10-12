@@ -44,6 +44,15 @@ jobs:
           go tool cover -func=coverage.out | tee coverage-summary.log
           awk '/^total:/ { found=1; sub(/%$/, "", $NF); if ($NF + 0 < 80) { print "Module statement coverage is below 80%"; exit 1 } } END { if (!found) exit 1 }' coverage-summary.log
 
+      - name: Build and test unified CLI over container UDP
+        env:
+          KADLAB_DOCKER_IMAGE: kadlab:part12-test
+        shell: bash
+        run: |
+          set -o pipefail
+          docker build -t kadlab:part12-test .
+          go test -v ./cmd/simshell -run TestDockerUnifiedCLI -count=1 2>&1 | tee go-test-docker.log
+
       - name: Publish test summary
         if: always()
         shell: bash
@@ -90,4 +99,5 @@ jobs:
             labs/go-coverage.log
             labs/coverage-summary.log
             labs/coverage.out
+            labs/go-test-docker.log
           if-no-files-found: ignore

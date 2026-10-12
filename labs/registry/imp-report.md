@@ -3,6 +3,49 @@
 Append an entry here for each registry addition, including behavior, affected
 files, validation, and remaining limitations.
 
+## Unified CLI on simulated and 50-container UDP networks
+
+The Docker stack now mounts the same public ownership JSON on all 50 servers
+(one bootstrap and 49 replicas) using a Docker Swarm config. `OWNERS_FILE` selects
+that verifier configuration, and the CLI now accepts `OWNERS_FILE` and
+`PUBLISHER_KEY` environment defaults with explicit flags taking precedence.
+Windows UTF-8 JSON with a byte-order mark is accepted, so ownership files created
+in PowerShell also work in Linux containers. Simulated mode uses the same CLI,
+ownership file, publisher key and Part 1/Part 2 command handlers.
+
+`docker-lab.ps1` provides Prepare, Start, Status, Shell and Stop actions. Prepare
+creates or reuses local keys/ownership files, preserves other owners and rejects
+an existing different owner. Start builds the image, initializes Swarm if needed,
+creates an immutable public config with a content-derived name, and deploys the
+50-server stack. Config versioning supports later ownership changes.
+
+Shell uses the new `kadlab-shell` launcher to open a separate UDP CLI node on port
+9000 in the bootstrap container while the server stays on port 8000. Only that
+publisher session receives a temporary private-key file, removed on exit. Replicas
+receive public ownership data only. Docker builds copy required Go source
+explicitly; `.dockerignore` and Git ignore local private-key files and build
+artifacts. Existing user release, download, key and ownership files are preserved.
+
+`cmd/README.md` documents both modes, stack startup, sample files, publications,
+installs, forced rejection and shutdown. Updating the stack restarts containers
+and can lose in-memory values. Development validation leaves the user's existing
+running stack unchanged. Tests cover environment defaults, explicit overrides
+and Windows ownership JSON. `TestDockerUnifiedCLI` builds an isolated two-server
+container network and runs separate publisher/reader clients over real UDP. It
+checks Part 1 ping/store, DNS/history inspection, two authenticated publications
+accepted by all three selected nodes, forced-fork rejection, and remote latest
+and historical install bytes. Replicas receive only the public file; only the
+publisher client mounts its private key. The test removes its own containers and
+network, leaving the existing stack intact. CI builds the image and runs this
+Docker integration test explicitly.
+
+Validation passed: full Go regular and race suites (`GOMAXPROCS=2`, `-p 1`),
+Docker image build with Go 1.22.1, the isolated Docker UDP integration test,
+`docker stack config` with both ownership mounts and the 1+49 replica counts,
+PowerShell parser checks, fresh-key Prepare and idempotent Prepare, formatting
+and `git diff --check`. The running 50-server stack was not redeployed during
+validation; the documented Start action applies the new image/config when run.
+
 ## Issue #54: end-to-end registry and CLI regression tests
 
 ### What was added and why

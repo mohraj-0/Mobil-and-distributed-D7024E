@@ -76,6 +76,73 @@ split on whitespace, so use paths without spaces at the prompt.
 
 ## CLI Testing
 
+The same CLI works against the real 50-container UDP stack. From `labs`, use:
+
+```powershell
+.\docker-lab.ps1 -Action Prepare
+.\docker-lab.ps1 -Action Start
+.\docker-lab.ps1 -Action Status
+.\docker-lab.ps1 -Action Shell
+```
+
+Prepare reuses matching `publisher.key` and `owners.json`, creates them when
+absent, and refuses to replace a different configured owner. `-Domain`,
+`-PublisherKey`, `-OwnersFile`, and `-Stack` select alternatives. Start rebuilds
+the image and deploys one bootstrap plus 49 replicas. Wait for `1/1` and `49/49`
+before opening Shell. Updating the stack restarts containers and may lose their
+in-memory values.
+
+All servers receive the same public ownership JSON through an immutable Swarm
+config, named using the file's content hash. The private key is excluded from
+images and configs. Shell temporarily copies it only to the bootstrap container
+for the publisher session, starts a separate CLI node on port 9000, then removes
+the temporary key copy on exit. Existing servers remain on port 8000.
+
+Create sample files before opening the shell:
+
+```powershell
+$bootstrap = docker ps --filter 'label=com.docker.swarm.service.name=kadlab_kademlia-bootstrap' --format '{{.ID}}'
+docker exec $bootstrap sh -c 'echo version-one > /tmp/release1.txt; echo version-two > /tmp/release2.txt'
+.\docker-lab.ps1 -Action Shell
+```
+
+```text
+ping kademlia-bootstrap:8000
+put /tmp/release1.txt
+get HASH_PRINTED_BY_PUT /tmp/download.txt
+show rt
+show dns example.com
+publish example.com:demo:1 /tmp/release1.txt
+publish --prev=1 example.com:demo:2 /tmp/release2.txt
+show example.com:demo
+show ds
+install example.com:demo:1 --output /tmp/historical.pkg
+install example.com:demo:latest --output /tmp/latest.pkg
+publish --force --prev=0 example.com:demo:3 /tmp/release2.txt
+show example.com:demo
+exit
+```
+
+The forced fork must be rejected, leaving latest at version 2. Stop the stack
+using `.\docker-lab.ps1 -Action Stop`. Host keys and public configs remain available.
+To use the same ownership files in simulated mode:
+
+```powershell
+go run ./cmd/simshell --nodes 50 --owners-file owners.json --publisher-key publisher.key
+```
+
+`OWNERS_FILE` and `PUBLISHER_KEY` also provide CLI environment defaults; flags
+override them. Without an ownership file, the verifier uses real DNS TXT.
+Manual stack deployment requires creating the public config first:
+
+```powershell
+docker config create kadlab-owners owners.json
+$env:KADLAB_OWNERS_CONFIG = 'kadlab-owners'
+docker stack deploy -c docker-compose.yml kadlab
+```
+
+The helper handles existing configs and subsequent ownership-file changes.
+
 The normal test suite includes independent-replica authenticity and catch-up
 tests over `network.go`'s simulated network and loopback UDP, CLI receiver-state
 regressions, real stdin/quit subprocess tests, remote latest/historical installs,
@@ -206,7 +273,7 @@ Deploy the stack from the `labs` directory:
 
 ```powershell
 cd C:\Users\natan\Desktop\Mobile\Mobil-and-distributed-D7024E\labs
-docker stack deploy -c docker-compose.yml kadlab
+.\docker-lab.ps1 -Action Start
 ```
 
 Check that all nodes are running:
@@ -279,6 +346,17 @@ This is a real network test because the stack uses `--transport udp` and each no
 Note that `show ds` prints the data store of the currently running CLI node only. In a Kademlia network, `put` stores data on the nodes closest to the key, so `show ds` can be empty on one node even when `put` and `get` work correctly.
 
 ## Useful Docker Debugging Commands
+
+An isolated Docker regression test exercises the built image with independent
+UDP containers and the included CLI launcher. It creates/removes its own test
+network and never redeploys an existing stack:
+
+```powershell
+docker build -t kadlab:part12-test .
+$env:KADLAB_DOCKER_IMAGE = 'kadlab:part12-test'
+go test ./cmd/simshell -run TestDockerUnifiedCLI -count=1
+Remove-Item Env:KADLAB_DOCKER_IMAGE
+```
 
 Show swarm services:
 

@@ -94,8 +94,8 @@ func (s *shell) root() *cobra.Command {
 	root.PersistentFlags().IntVar(&s.opts.nodes, "nodes", 1, "number of in-process simulated nodes")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapAddr, "bootstrap-addr", envDefault("BOOTSTRAP_ADDR", ""), "bootstrap node address")
 	root.PersistentFlags().StringVar(&s.opts.bootstrapID, "bootstrap-id", envDefault("BOOTSTRAP_ID", ""), "bootstrap node ID")
-	root.PersistentFlags().StringVar(&s.opts.publisherKey, "publisher-key", "", "local hex Ed25519 private-key file for publish")
-	root.PersistentFlags().StringVar(&s.opts.ownersFile, "owners-file", "", "fake DNS JSON map of domains to public-key hex; default: real DNS TXT")
+	root.PersistentFlags().StringVar(&s.opts.publisherKey, "publisher-key", envDefault("PUBLISHER_KEY", ""), "local hex Ed25519 private-key file for publish")
+	root.PersistentFlags().StringVar(&s.opts.ownersFile, "owners-file", envDefault("OWNERS_FILE", ""), "fake DNS JSON map of domains to public-key hex; default: real DNS TXT")
 
 	root.AddCommand(
 		&cobra.Command{Use: "serve", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
