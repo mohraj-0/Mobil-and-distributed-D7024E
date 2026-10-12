@@ -282,7 +282,8 @@ func (n *Kademlia) PublishLatest(p LatestPointer) (map[string]error, error) {
 }
 
 // LookupLatest compares authenticated replica responses. Conflicting branches
-// are reported rather than silently resolved. Read repair is a separate policy.
+// are reported rather than silently resolved. Only after all responses agree
+// does it catch up locally and repair replicas using authenticated UPDATE_LATEST.
 func (n *Kademlia) LookupLatest(domain, pkg string) (*LatestPointer, error) {
 	if !canonicalNamespace(domain, pkg) {
 		return nil, latestError("malformed", "invalid namespace")
@@ -292,10 +293,18 @@ func (n *Kademlia) LookupLatest(domain, pkg string) (*LatestPointer, error) {
 	}
 	key := LatestKey(domain, pkg)
 	me := n.me()
+	peers := n.latestPeers(key)
+	// The accepted local head constrains a read even outside the replica set.
+	readPeers := append([]Contact{me}, peers...)
+	seen := map[string]bool{}
 	var best *LatestPointer
 	var ancestry []string
 	last := latestError("missing_data", "pointer not found")
-	for _, c := range n.latestPeers(key) {
+	for _, c := range readPeers {
+		if seen[c.ID.String()] {
+			continue
+		}
+		seen[c.ID.String()] = true
 		var value []byte
 		if c.ID.Equals(me.ID) {
 			value = n.DataSnapshot()[key]
@@ -338,6 +347,37 @@ func (n *Kademlia) LookupLatest(domain, pkg string) (*LatestPointer, error) {
 	}
 	if best == nil {
 		return nil, last
+	}
+	value, err := json.Marshal(best)
+	if err != nil {
+		return nil, err
+	}
+	if err = n.commitLatest(key, value, *best, ancestry); err != nil {
+		// A concurrent publication may have overtaken this read. Authenticate
+		// the committed head and return it only if it extends the read result.
+		current := n.DataSnapshot()[key]
+		p, history, verifyErr := n.verifyLatest(key, current)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		compatible := false
+		for _, hash := range history {
+			if hash == best.VersionRecordHash && p.Version > best.Version {
+				compatible = true
+			}
+		}
+		if !compatible {
+			return nil, err
+		}
+		best, value = &p, current
+	}
+	// Repair is best effort: unavailable replicas must not invalidate a valid
+	// read. The receiver re-verifies ancestry and re-checks its committed head,
+	// so a delayed repair can never overwrite a newer publication or a fork.
+	for _, c := range peers {
+		if !c.ID.Equals(me.ID) {
+			_, _ = n.latestRPC(c, "UPDATE_LATEST", key, value)
+		}
 	}
 	return best, nil
 }

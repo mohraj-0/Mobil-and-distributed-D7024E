@@ -3,6 +3,74 @@
 Append an entry here for each registry addition, including behavior, affected
 files, validation, and remaining limitations.
 
+## Issue #50: stale-node catch-up and latest-pointer repair
+
+### What changed and why
+
+`kademlia/latest.go` now catches up the querying node after comparing all
+reachable selected replicas, then sends the chosen pointer to replicas through
+`UPDATE_LATEST`. Previously a lookup returned the newest compatible pointer
+without updating the querying node or repairing stale replicas. A node that
+missed publications could therefore remain stale even after a successful read.
+The local accepted head now participates even when the node is outside the
+closest replica set. This prevents a stale remote response from bypassing the
+reader's own accepted history.
+
+### How verification and repair work
+
+The existing shared `metadata.TraverseHistory` fetches predecessor records all
+the way to a valid zero-predecessor genesis. It verifies content hashes, owner
+signatures, namespace, record references, and strictly increasing successor
+versions, with cycle detection and a 1,024-record bound. This implementation
+retains full genesis verification rather than stopping at a cached accepted
+head. The pointer must authenticate and match the referenced record's version.
+Missing records or failed verification cannot partially advance a head.
+
+Lookup compares authenticated histories in either response order and chooses
+the greatest version only when histories extend each other. Owner-signed forks
+remain explicit conflicts; no repair runs when observed valid histories conflict.
+The chosen history is committed through `commitLatest`, which re-reads the head
+under the package lock. If a concurrent publication has overtaken the read,
+lookup authenticates that committed head and returns it only if it extends the
+selected result. A concurrent conflicting publication fails the read.
+
+Repair uses the same authenticated RPC as publication, including receiver-side
+record retrieval and final locked head checks. A delayed older repair is rejected
+and cannot overwrite a newer state. Identical repair is idempotent. Repair is
+best effort: a timeout, departed replica, or receiver rejection does not invalidate
+an otherwise verified read. Catch-up retrieves records for verification without
+caching them, preserving the existing immutable lookup behavior.
+
+### Tests and validation
+
+`kademlia/latest_catchup_test.go` adds disconnected/rejoining replicas missing
+three publications and their records, both stale-first and newest-first reads,
+repair of stale replicas, an unavailable intermediate with unchanged stored
+state, the local-head constraint outside the selected replica set, and delayed
+repair rejection. A barrier also holds repair authentication while a newer
+publication commits, checking the final head re-check prevents rollback.
+Another barrier delays a remote read while a newer compatible local publication
+commits; lookup returns that newer head and repairs the remote to it.
+Existing history tests cover invalid signatures, hashes, namespaces, ancestry,
+version ordering, concurrent sibling updates, and partitioned owner equivocation.
+
+Validation passed from `labs`: `GOMAXPROCS=2 go test -p 1 ./...` and focused
+race checks with `go test -race -p 1 ./kademlia ./metadata ./registry -run
+'TestLatest|TestHistory|TestRejectInvalidHistory|TestRegistryAcrossSimulatedDHT'
+-count=1`. After adding the delayed-read barrier test, both its focused regular
+run and `go test -race -p 1 ./kademlia -run TestLatest -count=1` passed.
+Windows race checks used CGO with `C:\msys64\ucrt64\bin\gcc.exe`.
+`gofmt` and `git diff --check` also passed. Initial test attempts encountered
+Windows allocation/paging-file failures; subsequent retries completed normally.
+
+### Remaining limitations
+
+This remains per-node authenticated history validation rather than global
+consensus. Unreachable forks cannot be detected, repair is triggered by reads,
+heads remain in memory, and records must remain retrievable for full genesis
+verification. Sequential replica requests and synchronous best-effort repair can
+add RPC timeout latency to a lookup; no background repair queue is introduced.
+
 ## Issue #48: authenticated mutable latest-pointer RPCs
 
 Registry storage and traversal live in `registry`. Signing, record types and DNS
