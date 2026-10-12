@@ -1,5 +1,36 @@
 # Lookup experiments
 
+## Scalability up to 1,000 nodes
+
+From `labs`, run `./experiments/run_scalability.ps1` to run and plot the experiment.
+Python needs matplotlib (`python -m pip install -r experiments/requirements.txt`).
+The plot script also supports the existing local `labs/.plot-deps` directory.
+
+Seven network sizes (10, 20, 50, 100, 200, 500, 1000) use alpha=3, k=20,
+three seeds, and 30 node plus 30 value lookups per seed: 1,260 measured lookups.
+Networks use simulated transport and real bootstrap joins, with no injected
+loss, latency, churn, or background maintenance. Setup/store RPCs are excluded
+from lookup CSV measurements. Local value hits are included and cost zero RPCs.
+
+Artifacts in `experiments/scalability-1000`:
+
+- `lookup_raw.csv`: timestamped RPC probes and final lookup results.
+- `lookup_summary.csv`: measured costs and success rates.
+- `comparison.csv`: actual mean probes, estimated rounds, and log2(N) reference.
+- `scalability.png` / `.svg`: node and value panels, each with measured and expected-reference lines.
+- `report.md`: setup and measured summary; `runtime.log` is saved when rerunning the script.
+
+Rounds are estimated as ceil(probes/alpha), not instrumented sequential depth
+or wall-clock latency. The theoretical line is the illustrative log2(N) growth
+reference, not an exact finite-size prediction or a curve fitted to results.
+Kademlia gives logarithmic lookup scaling; constants depend on routing, k,
+parallelism, replication and cache hits. See the
+[original paper](https://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia-lncs.pdf).
+Seeded inputs are repeatable; concurrent scheduling can change measured probes.
+
+To regenerate just the CSV comparison and plots from recorded results:
+`python experiments/plot_scalability.py --input experiments/scalability-1000`.
+
 `-value-bytes` supports **1–32,768 raw bytes (32 KiB)** per value. See [Kademlia value sizes](../kademlia/README.md) for transport limits and boundary tests.
 
 Run it from `labs`:
