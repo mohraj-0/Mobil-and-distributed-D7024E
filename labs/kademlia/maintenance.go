@@ -108,6 +108,10 @@ func (n *Kademlia) Replicate() {
 	for key, value := range n.DataSnapshot() {
 		// Part 2 mutable pointers are not content-addressed blobs.
 		if hashValue(value) != key {
+			var pointer LatestPointer
+			if json.Unmarshal(value, &pointer) == nil && pointer.Tag == LatestPointerTag && key == LatestKey(pointer.Domain, pointer.Package) {
+				_, _ = n.PublishLatest(pointer)
+			}
 			continue
 		}
 		_, _ = n.Store(value)

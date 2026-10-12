@@ -239,6 +239,10 @@ func TestRegistryAcrossSimulatedDHT(t *testing.T) {
 	}
 	r, _, sk := fixture(t)
 	r.Store = nodes[0]
+	for _, node := range nodes {
+		node.K = 2
+		node.OwnershipVerifier = r.OwnershipVerifier
+	}
 	blob, err := r.StoreBlob([]byte{0, 255, 1, 128})
 	if err != nil {
 		t.Fatal(err)
@@ -252,5 +256,22 @@ func TestRegistryAcrossSimulatedDHT(t *testing.T) {
 	data, err := r.DownloadVersion(head, "example.com", "mypackage")
 	if err != nil || !bytes.Equal(data, []byte{0, 255, 1, 128}) {
 		t.Fatalf("DHT download: %v %v", data, err)
+	}
+	pointer := LatestPointer{Tag: LatestPointerTag, Domain: record.Domain, Package: record.Package, Version: record.Version, VersionRecordHash: head}
+	if err := SignLatestPointer(&pointer, sk); err != nil {
+		t.Fatal(err)
+	}
+	results, err := nodes[0].PublishLatest(pointer)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("registry pointer publication: %v %v", results, err)
+	}
+	for address, err := range results {
+		if err != nil {
+			t.Fatalf("replica %s: %v", address, err)
+		}
+	}
+	got, err := nodes[1].LookupLatest(record.Domain, record.Package)
+	if err != nil || got == nil || *got != pointer {
+		t.Fatalf("registry pointer lookup: %v %v", got, err)
 	}
 }

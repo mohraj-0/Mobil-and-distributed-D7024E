@@ -44,8 +44,13 @@ const (
 
 // Kademlia innehåller logiken för en lokal Kademlia-nod.
 type Kademlia struct {
-	RoutingTable *RoutingTable
-	Network      Node
+	pointerMu        sync.Mutex
+	pointerRPCMu     sync.Mutex
+	pointerResponses map[string]chan rpcMessage
+	RoutingTable     *RoutingTable
+	Network          Node
+	// Each receiver resolves trusted owner keys independently of the publisher.
+	OwnershipVerifier OwnershipVerifier
 
 	// Antal noder som frågas parallellt. Default är 3.
 	Alpha int
@@ -96,6 +101,8 @@ type wireContact struct {
 
 // Gemensamt RPC-meddelande.
 type rpcMessage struct {
+	Status        string `json:"status,omitempty"`
+	Error         string `json:"error,omitempty"`
 	Type          string `json:"type"`
 	RequestID     string `json:"request_id"`
 	SenderID      string `json:"sender_id"`
@@ -286,6 +293,10 @@ func (kademlia *Kademlia) handleRPCMessage(message Message) {
 	}
 
 	switch rpc.Type {
+	case "UPDATE_LATEST", "READ_LATEST":
+		kademlia.handleLatestRPC(rpc)
+	case "LATEST_REPLY":
+		kademlia.handleLatestReply(rpc)
 	case "PING":
 		kademlia.handlePing(rpc)
 	case "PING_REPLY":
@@ -604,12 +615,12 @@ func (kademlia *Kademlia) sendFindValueRPC(contact Contact, key *KademliaID) (fi
 			return result, nil
 
 		case <-time.After(kademlia.rpcTimeout()):
-			lastErr = fmt.Errorf("FIND_VALUE timeout")
+			lastErr = latestError("timeout", "FIND_VALUE timeout")
 		}
 	}
 
 	return empty, fmt.Errorf(
-		"FIND_VALUE failed after %d attempts: %v",
+		"FIND_VALUE failed after %d attempts: %w",
 		kademlia.rpcRetries(),
 		lastErr,
 	)
@@ -825,6 +836,7 @@ func (kademlia *Kademlia) LookupDataFrom(hash string) (value []byte, source Cont
 	seen := make(map[string]bool)
 	queried := make(map[string]bool)
 	failed := make(map[string]bool)
+	var lookupErr error
 
 	for _, contact := range candidates {
 		if contact.ID != nil {
@@ -879,6 +891,7 @@ func (kademlia *Kademlia) LookupDataFrom(hash string) (value []byte, source Cont
 		for i := 0; i < len(toQuery); i++ {
 			response := <-results
 			if response.err != nil {
+				lookupErr = response.err
 				kademlia.RoutingTable.Remove(response.contact)
 				failed[response.contact.ID.String()] = true
 				continue
@@ -896,6 +909,7 @@ func (kademlia *Kademlia) LookupDataFrom(hash string) (value []byte, source Cont
 					return append([]byte(nil), response.result.Value...), response.result.Source, nil
 				}
 				log.Printf("event=hash_error key=%s source=%s", hash, response.contact.Address)
+				lookupErr = latestError("authentication", "record hash mismatch")
 				continue
 			}
 
@@ -919,7 +933,10 @@ func (kademlia *Kademlia) LookupDataFrom(hash string) (value []byte, source Cont
 		candidates = liveCandidates(candidates, failed)
 	}
 
-	return nil, Contact{}, fmt.Errorf("value not found")
+	if lookupErr != nil {
+		return nil, Contact{}, lookupErr
+	}
+	return nil, Contact{}, latestError("missing_data", "value not found")
 }
 
 // Lagrar data på de k närmaste noderna.
