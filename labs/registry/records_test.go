@@ -1,4 +1,4 @@
-package kademlia
+package registry
 
 import (
 	"crypto/ed25519"
