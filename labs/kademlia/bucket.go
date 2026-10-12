@@ -7,13 +7,15 @@ import (
 // bucket är en k-bucket i routingtabellen.
 // Den håller en ordnad lista av kontakter där fronten är senast sedd kontakt.
 type bucket struct {
-	list *list.List
+	list     *list.List
+	capacity int
 }
 
 // newBucket skapar en tom bucket med en dubbellänkad lista.
 func newBucket() *bucket {
 	bucket := &bucket{}
 	bucket.list = list.New()
+	bucket.capacity = bucketSize
 	return bucket
 }
 
@@ -31,10 +33,11 @@ func (bucket *bucket) AddContact(contact Contact) {
 	}
 
 	if element == nil {
-		if bucket.list.Len() < bucketSize {
+		if bucket.list.Len() < bucket.capacity {
 			bucket.list.PushFront(contact)
 		}
 	} else {
+		element.Value = contact
 		bucket.list.MoveToFront(element)
 	}
 }

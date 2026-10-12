@@ -1,12 +1,19 @@
 package kademlia
 
-const bucketSize = 20
+import (
+	"crypto/rand"
+	"sync"
+	"time"
+)
+
+const bucketSize = 10
 const defaultRoutingTreeBranchBits = 1
 
 // RoutingTable stores known contacts in a Kademlia routing tree. Leaf nodes are
-// k-buckets, and an overflowing leaf is split only when its range contains the
-// local node ID.
+// k-buckets; full leaves split when they contain the local ID or depth%b != 0.
 type RoutingTable struct {
+	mu         sync.Mutex
+	capacity   int
 	me         Contact
 	root       *routingTreeNode
 	branchBits int
@@ -14,16 +21,16 @@ type RoutingTable struct {
 
 type routingTreeNode struct {
 	// A node is a leaf when bucket is non-nil. Internal nodes set bucket to nil
-	// and route contacts into children according to the next branchBits bits.
+	// and route contacts into children according to the next ID bit.
 	bucket   *bucket
 	children []*routingTreeNode
+	updated  time.Time
 
 	// depth is the number of ID prefix bits already consumed on the path from
-	// the root to this node. For b=2, depths are 0, 2, 4, ...
+	// the root to this node. Each binary split consumes one bit.
 	depth int
 
-	// Kademlia only keeps splitting the bucket that contains the local node.
-	// Other full buckets keep at most k contacts.
+	// Local buckets may always split. Non-local buckets may split at depth%b != 0.
 	containsMe bool
 }
 
@@ -34,7 +41,7 @@ func NewRoutingTable(me Contact) *RoutingTable {
 }
 
 // NewRoutingTableWithBranchBits creates a generalized routing tree where b is
-// the number of bits consumed at each tree level. The branching factor is 2^b.
+// the acceleration parameter from the lab routing-tree supplement. Splits remain binary; b permits extra splits at depths not divisible by b.
 func NewRoutingTableWithBranchBits(me Contact, branchBits int) *RoutingTable {
 	if branchBits < 1 {
 		branchBits = 1
@@ -44,6 +51,7 @@ func NewRoutingTableWithBranchBits(me Contact, branchBits int) *RoutingTable {
 	}
 
 	return &RoutingTable{
+		capacity:   bucketSize,
 		me:         me,
 		root:       newRoutingTreeNode(0, true),
 		branchBits: branchBits,
@@ -55,12 +63,19 @@ func newRoutingTreeNode(depth int, containsMe bool) *routingTreeNode {
 		bucket:     newBucket(),
 		depth:      depth,
 		containsMe: containsMe,
+		updated:    time.Now(),
 	}
 }
 
 // AddContact inserts a contact into the appropriate leaf bucket. If that bucket
-// is full and contains this node, the bucket is split and insertion is retried.
+// is full and may split according to b, it splits and insertion is retried.
 func (routingTable *RoutingTable) AddContact(contact Contact) {
+	routingTable.mu.Lock()
+	defer routingTable.mu.Unlock()
+	routingTable.add(contact)
+}
+
+func (routingTable *RoutingTable) add(contact Contact) {
 	if contact.ID == nil {
 		return
 	}
@@ -76,28 +91,29 @@ func (routingTable *RoutingTable) addContact(node *routingTreeNode, contact Cont
 	if node.isLeaf() {
 		// Existing contacts are allowed through even when the bucket is full so
 		// bucket.AddContact can move them to the front as "recently seen".
-		if node.bucket.Len() < bucketSize || node.bucket.hasContact(contact) || !node.canSplit() {
+		if node.bucket.Len() < routingTable.capacity || node.bucket.hasContact(contact) || !routingTable.canSplit(node) {
 			node.bucket.AddContact(contact)
+			if node.bucket.hasContact(contact) {
+				node.updated = time.Now()
+			}
 			return
 		}
 
-		// The only remaining case is a full leaf bucket on the local node's
-		// prefix path, so split it and retry insertion in the new child.
+		// Split an eligible full leaf and retry insertion in its child.
 		routingTable.split(node)
 		routingTable.addContact(node, contact)
 		return
 	}
 
-	childIndex := routingTable.childIndex(contact.ID, node.depth)
-	routingTable.addContact(node.children[childIndex], contact)
+	routingTable.addContact(routingTable.child(node, contact.ID), contact)
 }
 
 func (node *routingTreeNode) isLeaf() bool {
 	return node.bucket != nil
 }
 
-func (node *routingTreeNode) canSplit() bool {
-	return node.containsMe && node.depth < IDLength*8
+func (rt *RoutingTable) canSplit(node *routingTreeNode) bool {
+	return node.depth < IDLength*8 && (node.containsMe || node.depth%rt.branchBits != 0)
 }
 
 func (routingTable *RoutingTable) split(node *routingTreeNode) {
@@ -107,7 +123,8 @@ func (routingTable *RoutingTable) split(node *routingTreeNode) {
 	meChildIndex := routingTable.childIndex(routingTable.me.ID, node.depth)
 
 	for i := range children {
-		children[i] = newRoutingTreeNode(node.depth+bits, i == meChildIndex)
+		children[i] = newRoutingTreeNode(node.depth+bits, node.containsMe && i == meChildIndex)
+		children[i].bucket.capacity = routingTable.capacity
 	}
 
 	contacts := node.bucket.Contacts()
@@ -116,7 +133,8 @@ func (routingTable *RoutingTable) split(node *routingTreeNode) {
 
 	// Redistribute the old bucket contents using the same prefix bits that will
 	// route future contacts into these children.
-	for _, contact := range contacts {
+	for i := len(contacts) - 1; i >= 0; i-- {
+		contact := contacts[i]
 		childIndex := routingTable.childIndex(contact.ID, node.depth)
 		children[childIndex].bucket.AddContact(contact)
 	}
@@ -125,6 +143,8 @@ func (routingTable *RoutingTable) split(node *routingTreeNode) {
 // FindClosestContacts returns the count contacts with smallest XOR distance to
 // target. The tree is used for storage; the final result is sorted by distance.
 func (routingTable *RoutingTable) FindClosestContacts(target *KademliaID, count int) []Contact {
+	routingTable.mu.Lock()
+	defer routingTable.mu.Unlock()
 	if target == nil || count <= 0 {
 		return nil
 	}
@@ -147,6 +167,8 @@ func (routingTable *RoutingTable) Me() Contact {
 // NonEmptyBucketIndices returns the indices of non-empty leaf buckets in a
 // deterministic left-to-right tree traversal.
 func (routingTable *RoutingTable) NonEmptyBucketIndices() []int {
+	routingTable.mu.Lock()
+	defer routingTable.mu.Unlock()
 	return collectLeafValues(routingTable, func(index int, node *routingTreeNode, _ KademliaID) (int, bool) {
 		if node.bucket.Len() == 0 {
 			return 0, false
@@ -157,6 +179,8 @@ func (routingTable *RoutingTable) NonEmptyBucketIndices() []int {
 
 // ContactsInBucket returns the current contents of one leaf bucket.
 func (routingTable *RoutingTable) ContactsInBucket(bucketIndex int) []Contact {
+	routingTable.mu.Lock()
+	defer routingTable.mu.Unlock()
 	matches := collectLeafValues(routingTable, func(index int, node *routingTreeNode, prefix KademliaID) ([]Contact, bool) {
 		if index != bucketIndex {
 			return nil, false
@@ -171,17 +195,27 @@ func (routingTable *RoutingTable) ContactsInBucket(bucketIndex int) []Contact {
 	return matches[0]
 }
 
-// RefreshIDForBucket returns a representative ID inside a leaf bucket's range.
+// RefreshIDForBucket returns a random ID inside the selected leaf bucket range.
 func (routingTable *RoutingTable) RefreshIDForBucket(bucketIndex int) *KademliaID {
-	matches := collectLeafValues(routingTable, func(index int, _ *routingTreeNode, prefix KademliaID) (*KademliaID, bool) {
+	routingTable.mu.Lock()
+	defer routingTable.mu.Unlock()
+	matches := collectLeafValues(routingTable, func(index int, node *routingTreeNode, prefix KademliaID) (*KademliaID, bool) {
 		if index != bucketIndex {
 			return nil, false
 		}
 		target := prefix
+		var random KademliaID
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, false
+		}
+		for bit := node.depth; bit < IDLength*8; bit++ {
+			setBit(&target, bit, bitAt(&random, bit))
+		}
+		node.updated = time.Now()
 		return &target, true
 	})
 	if len(matches) == 0 {
-		return routingTable.me.ID
+		return nil
 	}
 	return matches[0]
 }
@@ -234,13 +268,13 @@ func collectLeafValues[T any](routingTable *RoutingTable, pick func(int, *routin
 	return values
 }
 
+// The routing tree is binary for every b. Parameter b determines which
+// non-local full buckets may split: depth % b != 0 (supplementary lab PDF).
 func (routingTable *RoutingTable) bitsAtDepth(depth int) int {
-	remaining := IDLength*8 - depth
-	// The last level may have fewer than b bits if b does not divide B.
-	if remaining < routingTable.branchBits {
-		return remaining
+	if depth >= IDLength*8 {
+		return 0
 	}
-	return routingTable.branchBits
+	return 1
 }
 
 func (routingTable *RoutingTable) childIndex(id *KademliaID, depth int) int {
@@ -278,4 +312,120 @@ func setBit(id *KademliaID, bitIndex int, bit int) {
 		return
 	}
 	id[byteIndex] &^= 1 << shift
+}
+
+func (rt *RoutingTable) child(node *routingTreeNode, id *KademliaID) *routingTreeNode {
+	return node.children[rt.childIndex(id, node.depth)]
+}
+
+// SetCapacity configures k before use, retaining the most recently seen contacts.
+func (rt *RoutingTable) SetCapacity(k int) {
+	if k <= 0 {
+		k = bucketSize
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.capacity == k {
+		return
+	}
+	rt.capacity = k
+	collectLeafValues(rt, func(_ int, n *routingTreeNode, _ KademliaID) (int, bool) {
+		n.bucket.capacity = k
+		for n.bucket.Len() > k {
+			n.bucket.list.Remove(n.bucket.list.Back())
+		}
+		return 0, false
+	})
+}
+
+// Offer returns the least recently seen contact when an unsplittable bucket is full.
+// Network liveness checks happen outside the routing-table lock.
+func (rt *RoutingTable) Offer(c Contact) (Contact, time.Time, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if c.ID == nil || c.ID.Equals(rt.me.ID) {
+		return Contact{}, time.Time{}, false
+	}
+	rt.add(c)
+	n := rt.root
+	for !n.isLeaf() {
+		n = rt.child(n, c.ID)
+	}
+	if n.bucket.hasContact(c) {
+		return Contact{}, time.Time{}, false
+	}
+	return n.bucket.list.Back().Value.(Contact), n.updated, true
+}
+
+// ReplaceDead avoids evicting a bucket that has received newer traffic since probing.
+func (rt *RoutingTable) ReplaceDead(old, replacement Contact, observed time.Time) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	n := rt.root
+	for !n.isLeaf() {
+		n = rt.child(n, old.ID)
+	}
+	if !n.updated.Equal(observed) {
+		return
+	}
+	for e := n.bucket.list.Front(); e != nil; e = e.Next() {
+		if e.Value.(Contact).ID.Equals(old.ID) {
+			n.bucket.list.Remove(e)
+			break
+		}
+	}
+	rt.add(replacement)
+}
+
+func (rt *RoutingTable) Remove(c Contact) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if c.ID == nil {
+		return
+	}
+	n := rt.root
+	for !n.isLeaf() {
+		n = rt.child(n, c.ID)
+	}
+	for e := n.bucket.list.Front(); e != nil; e = e.Next() {
+		if e.Value.(Contact).ID.Equals(c.ID) {
+			n.bucket.list.Remove(e)
+			return
+		}
+	}
+}
+
+// RefreshTargets snapshots random IDs from stale materialized leaf ranges.
+// Every leaf range, including empty ranges, is represented explicitly.
+func (rt *RoutingTable) RefreshTargets(age time.Duration) []*KademliaID {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return collectLeafValues(rt, func(_ int, n *routingTreeNode, prefix KademliaID) (*KademliaID, bool) {
+		if age > 0 && time.Since(n.updated) < age {
+			return nil, false
+		}
+		target := prefix
+		var random KademliaID
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, false
+		}
+		for bit := n.depth; bit < IDLength*8; bit++ {
+			setBit(&target, bit, bitAt(&random, bit))
+		}
+		n.updated = time.Now()
+		return &target, true
+	})
+}
+
+func (rt *RoutingTable) Snapshot() map[int][]Contact {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	result := make(map[int][]Contact)
+	collectLeafValues(rt, func(i int, n *routingTreeNode, _ KademliaID) (int, bool) {
+		if n.bucket.Len() > 0 {
+			result[i] = n.bucket.Contacts()
+		}
+		return 0, false
+	})
+	return result
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,18 +20,21 @@ import (
 const (
 	defaultAddress   = "127.0.0.1:8000"
 	defaultTransport = "simulated"
-	defaultForce 	 = false	// enable for testing
+	defaultForce     = false // enable for testing
 )
 
 type options struct {
-	transport     string
-	addr          string
-	listenAddr    string
-	nodes         int
-	bootstrapAddr string
-	bootstrapID   string
-	force		  bool
-	prev		  string
+	alpha, k             int
+	branchBits           int
+	replication, refresh time.Duration
+	transport            string
+	addr                 string
+	listenAddr           string
+	nodes                int
+	bootstrapAddr        string
+	bootstrapID          string
+	force                bool
+	prev                 string
 }
 
 type shell struct {
@@ -72,6 +76,11 @@ func (s *shell) root() *cobra.Command {
 		},
 	}
 
+	root.PersistentFlags().IntVar(&s.opts.alpha, "alpha", 3, "parallel lookup probes")
+	root.PersistentFlags().IntVar(&s.opts.k, "k", 10, "bucket capacity and replica count")
+	root.PersistentFlags().IntVar(&s.opts.branchBits, "b", 1, "routing tree acceleration parameter (1..256)")
+	root.PersistentFlags().DurationVar(&s.opts.replication, "replication-period", time.Hour, "replica repair interval")
+	root.PersistentFlags().DurationVar(&s.opts.refresh, "refresh-period", time.Hour, "stale bucket refresh interval")
 	root.PersistentFlags().StringVar(&s.opts.transport, "transport", defaultTransport, "network transport: simulated or udp")
 	root.PersistentFlags().StringVar(&s.opts.addr, "addr", envDefault("ADDR", defaultAddress), "advertised local node address")
 	root.PersistentFlags().StringVar(&s.opts.listenAddr, "listen-addr", envDefault("LISTEN_ADDR", ""), "local bind address; defaults to --addr")
@@ -133,6 +142,9 @@ func (s *shell) configure() error {
 	if s.opts.nodes <= 0 {
 		return fmt.Errorf("--nodes must be at least 1")
 	}
+	if s.opts.branchBits < 0 || s.opts.branchBits > 256 || s.opts.alpha < 0 || s.opts.k < 0 || s.opts.replication < 0 || s.opts.refresh < 0 {
+		return fmt.Errorf("invalid Kademlia parameters")
+	}
 
 	switch strings.ToLower(s.opts.transport) {
 	case "simulated", "sim":
@@ -157,6 +169,17 @@ func (s *shell) configureSimulated() error {
 		if err != nil {
 			return err
 		}
+		if s.opts.alpha > 0 {
+			node.Alpha = s.opts.alpha
+		}
+		if s.opts.k > 0 {
+			node.K = s.opts.k
+		}
+		if s.opts.branchBits > 0 {
+			node.RoutingTable = kademlia.NewRoutingTableWithBranchBits(contact, s.opts.branchBits)
+		}
+		node.ReplicationPeriod, node.RefreshPeriod = s.opts.replication, s.opts.refresh
+		node.RoutingTable.SetCapacity(node.K)
 		go node.ListenForRPC()
 
 		if i == 0 {
@@ -167,6 +190,7 @@ func (s *shell) configureSimulated() error {
 			return fmt.Errorf("join simulated node %s: %w", addr, err)
 		}
 
+		node.StartMaintenance()
 		nodes = append(nodes, node)
 	}
 
@@ -175,6 +199,11 @@ func (s *shell) configureSimulated() error {
 }
 
 func (s *shell) configureUDP() error {
+	var err error
+	s.opts.addr, err = resolveUDPAddress(s.opts.addr)
+	if err != nil {
+		return err
+	}
 	listenAddr := s.opts.listenAddr
 	if listenAddr == "" {
 		listenAddr = s.opts.addr
@@ -187,10 +216,26 @@ func (s *shell) configureUDP() error {
 	s.node = node
 	s.contact = contact
 	s.network = transport
+	if s.opts.alpha > 0 {
+		node.Alpha = s.opts.alpha
+	}
+	if s.opts.k > 0 {
+		node.K = s.opts.k
+	}
+	if s.opts.branchBits > 0 {
+		node.RoutingTable = kademlia.NewRoutingTableWithBranchBits(contact, s.opts.branchBits)
+	}
+	node.ReplicationPeriod, node.RefreshPeriod = s.opts.replication, s.opts.refresh
+	node.RoutingTable.SetCapacity(node.K)
 	go node.ListenForRPC()
 
 	if s.opts.bootstrapAddr == "" {
+		node.StartMaintenance()
 		return nil
+	}
+	s.opts.bootstrapAddr, err = resolveUDPAddress(s.opts.bootstrapAddr)
+	if err != nil {
+		return err
 	}
 
 	bootstrapID := s.opts.bootstrapID
@@ -201,7 +246,11 @@ func (s *shell) configureUDP() error {
 	if id == nil {
 		return fmt.Errorf("invalid bootstrap ID")
 	}
-	return node.Join(kademlia.NewContact(id, s.opts.bootstrapAddr))
+	if err := node.Join(kademlia.NewContact(id, s.opts.bootstrapAddr)); err != nil {
+		return err
+	}
+	node.StartMaintenance()
+	return nil
 }
 
 func newNode(listenAddr string, advertiseAddr string, network kademlia.Node) (*kademlia.Kademlia, kademlia.Contact, kademlia.Node, error) {
@@ -375,21 +424,12 @@ func (s *shell) ping(rawAddr string) error {
 		return err
 	}
 
-	start := time.Now()
-	target := kademlia.NewContact(hashID(addr), addr)
-	contacts := s.node.LookupContact(&target)
-
-	if addr == s.contact.Address {
-		fmt.Printf("pong from %s in %s\n", addr, time.Since(start))
-		return nil
+	rtt, err := s.node.Ping(kademlia.Contact{Address: addr})
+	if err != nil {
+		return err
 	}
-	for _, contact := range contacts {
-		if contact.Address == addr {
-			fmt.Printf("pong from %s in %s\n", addr, time.Since(start))
-			return nil
-		}
-	}
-	return fmt.Errorf("no node reached at %s", addr)
+	fmt.Printf("pong from %s in %s\n", addr, rtt)
+	return nil
 }
 
 func (s *shell) put(filename string) error {
@@ -410,13 +450,14 @@ func (s *shell) get(key string, filename string) error {
 	if !validKey(key) {
 		return fmt.Errorf("key must be a %d-character hex SHA-256 hash", kademlia.IDLength*2)
 	}
-	data, err := s.node.LookupData(key)
+	data, source, err := s.node.LookupDataFrom(key)
 	if err != nil {
 		return err
 	}
 	if hashHex(data) != key {
 		return fmt.Errorf("stored value failed hash verification")
 	}
+	fmt.Printf("received from %s id=%s\n", source.Address, shortID(source.ID))
 	if filename != "" {
 		if err := os.WriteFile(filename, data, 0644); err != nil {
 			return err
@@ -431,22 +472,29 @@ func (s *shell) get(key string, filename string) error {
 func (s *shell) show(what string) error {
 	switch what {
 	case "rt":
-		for _, index := range s.node.RoutingTable.NonEmptyBucketIndices() {
-			contacts := s.node.RoutingTable.ContactsInBucket(index)
+		buckets := s.node.RoutingTable.Snapshot()
+		indices := make([]int, 0, len(buckets))
+		for index := range buckets {
+			indices = append(indices, index)
+		}
+		sort.Ints(indices)
+		for _, index := range indices {
+			contacts := buckets[index]
 			fmt.Printf("bucket %d: %d contacts\n", index, len(contacts))
 			for _, contact := range contacts {
 				fmt.Printf("  %s %s\n", shortID(contact.ID), contact.Address)
 			}
 		}
-		if len(s.node.RoutingTable.NonEmptyBucketIndices()) == 0 {
+		if len(buckets) == 0 {
 			fmt.Println("routing table is empty")
 		}
 	case "ds":
-		if len(s.node.DataStore) == 0 {
+		dataStore := s.node.DataSnapshot()
+		if len(dataStore) == 0 {
 			fmt.Println("data store is empty")
 			return nil
 		}
-		for key, data := range s.node.DataStore {
+		for key, data := range dataStore {
 			fmt.Printf("%s bytes=%d\n", shortKey(key), len(data))
 		}
 	case "nodes":
@@ -467,12 +515,16 @@ func (s *shell) show(what string) error {
 func (s *shell) close() {
 	if s.network != nil {
 		_ = s.network.Close()
+		if s.node != nil {
+			s.node.StopMaintenance()
+		}
 	}
 	for i, node := range s.peers {
 		if i == 0 || node.Network == nil {
 			continue
 		}
 		_ = node.Network.Close()
+		node.StopMaintenance()
 	}
 }
 
@@ -493,7 +545,6 @@ func hashID(address string) *kademlia.KademliaID {
 //     kademlia.Install(domain, pkg, version)
 // 	return nil
 // }
-
 
 func envDefault(name string, fallback string) string {
 	value := os.Getenv(name)
@@ -537,6 +588,18 @@ func parseAddress(raw string) (string, error) {
 		return "", fmt.Errorf("port must be between 1 and 65535")
 	}
 	return raw, nil
+}
+
+// Advertise concrete IP addresses, so all peers derive ID = SHA256(IP|port).
+func resolveUDPAddress(raw string) (string, error) {
+	if _, err := parseAddress(raw); err != nil {
+		return "", err
+	}
+	address, err := net.ResolveUDPAddr("udp4", raw)
+	if err != nil || address.IP == nil {
+		return "", fmt.Errorf("resolve advertised address %s: %v", raw, err)
+	}
+	return net.JoinHostPort(address.IP.String(), strconv.Itoa(address.Port)), nil
 }
 
 func offsetAddress(raw string, offset int) (string, error) {

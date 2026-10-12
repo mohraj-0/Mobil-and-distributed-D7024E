@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -63,7 +64,16 @@ type Kademlia struct {
 	RPCRetries int
 
 	// Timeout för RPC.
-	RPCTimeout time.Duration
+	RPCTimeout        time.Duration
+	ReplicationPeriod time.Duration
+	RefreshPeriod     time.Duration
+	maintenanceMu     sync.Mutex
+	maintenanceStop   chan struct{}
+	maintenanceDone   chan struct{}
+	evictionMu        sync.Mutex
+	evictions         map[string]bool
+	pingMu            sync.Mutex
+	pingResponses     map[string]chan struct{}
 
 	// Skyddar routing table när flera goroutines arbetar samtidigt.
 	routingMu sync.Mutex
@@ -113,6 +123,7 @@ type findValueResult struct {
 	Found    bool
 	Value    []byte
 	Contacts []Contact
+	Source   Contact
 }
 
 // Returnerar alpha-värdet. Default är 3.
@@ -199,15 +210,35 @@ func (kademlia *Kademlia) addContact(contact Contact) {
 	if kademlia.RoutingTable == nil || contact.ID == nil {
 		return
 	}
-	kademlia.routingMu.Lock()
-	defer kademlia.routingMu.Unlock()
-	kademlia.RoutingTable.AddContact(contact)
+	kademlia.RoutingTable.SetCapacity(kademlia.kValue())
+	old, observed, full := kademlia.RoutingTable.Offer(contact)
+	if !full || kademlia.Network == nil {
+		return
+	}
+	kademlia.evictionMu.Lock()
+	if kademlia.evictions == nil {
+		kademlia.evictions = make(map[string]bool)
+	}
+	id := old.ID.String()
+	if kademlia.evictions[id] {
+		kademlia.evictionMu.Unlock()
+		return
+	}
+	kademlia.evictions[id] = true
+	kademlia.evictionMu.Unlock()
+	go func() {
+		defer func() { kademlia.evictionMu.Lock(); delete(kademlia.evictions, id); kademlia.evictionMu.Unlock() }()
+		if _, err := kademlia.Ping(old); err != nil {
+			kademlia.RoutingTable.ReplaceDead(old, contact, observed)
+		}
+	}()
 }
 
 func (kademlia *Kademlia) closestContacts(target *KademliaID, count int) []Contact {
 	if kademlia.RoutingTable == nil || target == nil || count <= 0 {
 		return nil
 	}
+	kademlia.RoutingTable.SetCapacity(kademlia.kValue())
 	kademlia.routingMu.Lock()
 	defer kademlia.routingMu.Unlock()
 	return kademlia.RoutingTable.FindClosestContacts(target, count)
@@ -262,6 +293,10 @@ func (kademlia *Kademlia) handleRPCMessage(message Message) {
 	}
 
 	switch rpc.Type {
+	case "PING":
+		kademlia.handlePing(rpc)
+	case "PING_REPLY":
+		kademlia.handlePingReply(rpc)
 	case rpcFindNode:
 		kademlia.handleFindNodeRPC(rpc)
 	case rpcFindNodeReply:
@@ -323,6 +358,12 @@ func (kademlia *Kademlia) handleFindNodeRPC(rpc rpcMessage) {
 
 // Hanterar FIND_NODE_REPLY.
 func (kademlia *Kademlia) handleFindNodeReplyRPC(rpc rpcMessage) {
+	kademlia.findNodeMu.Lock()
+	pending := kademlia.findNodeResponses[rpc.RequestID] != nil
+	kademlia.findNodeMu.Unlock()
+	if !pending {
+		return
+	}
 	kademlia.addRPCSender(rpc)
 	contacts := wireToContacts(rpc.Contacts)
 
@@ -395,6 +436,7 @@ func (kademlia *Kademlia) sendFindNodeRPC(contact Contact, target *KademliaID) (
 	var lastErr error
 
 	for attempt := 0; attempt < kademlia.rpcRetries(); attempt++ {
+		log.Printf("event=probe rpc=%s target=%s attempt=%d request_id=%s", request.Type, contact.Address, attempt+1, requestID)
 		err = kademlia.Network.SendData(contact.Address, data)
 
 		if err != nil {
@@ -470,12 +512,19 @@ func (kademlia *Kademlia) handleFindValueRPC(rpc rpcMessage) {
 
 // Hanterar FIND_VALUE_REPLY.
 func (kademlia *Kademlia) handleFindValueReplyRPC(rpc rpcMessage) {
+	kademlia.findValueMu.Lock()
+	pending := kademlia.findValueResponses[rpc.RequestID] != nil
+	kademlia.findValueMu.Unlock()
+	if !pending {
+		return
+	}
 	kademlia.addRPCSender(rpc)
 
 	result := findValueResult{
 		Found:    rpc.Found,
 		Value:    append([]byte(nil), rpc.Value...),
 		Contacts: wireToContacts(rpc.Contacts),
+		Source:   NewContact(NewKademliaID(rpc.SenderID), rpc.SenderAddress),
 	}
 
 	for _, contact := range result.Contacts {
@@ -549,6 +598,7 @@ func (kademlia *Kademlia) sendFindValueRPC(contact Contact, key *KademliaID) (fi
 	var lastErr error
 
 	for attempt := 0; attempt < kademlia.rpcRetries(); attempt++ {
+		log.Printf("event=probe rpc=%s target=%s attempt=%d request_id=%s", request.Type, contact.Address, attempt+1, requestID)
 		err = kademlia.Network.SendData(contact.Address, data)
 
 		if err != nil {
@@ -613,6 +663,12 @@ func (kademlia *Kademlia) handleStoreRPC(rpc rpcMessage) {
 
 // Hanterar STORE_REPLY.
 func (kademlia *Kademlia) handleStoreReplyRPC(rpc rpcMessage) {
+	kademlia.storeMu.Lock()
+	pending := kademlia.storeResponses[rpc.RequestID] != nil
+	kademlia.storeMu.Unlock()
+	if !pending {
+		return
+	}
 	kademlia.addRPCSender(rpc)
 	kademlia.ensureStoreResponses()
 
@@ -727,16 +783,25 @@ func (kademlia *Kademlia) LookupContact(target *Contact) []Contact {
 
 // Söker iterativt efter data med alpha parallella FIND_VALUE-requests.
 func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
+	value, _, err := kademlia.LookupDataFrom(hash)
+	return value, err
+}
+
+func (kademlia *Kademlia) LookupDataFrom(hash string) (value []byte, source Contact, err error) {
+	defer func() {
+		log.Printf("event=lookup_result type=value key=%s success=%t error=%q", hash, err == nil, errText(err))
+	}()
+
 	if kademlia.RoutingTable == nil {
-		return nil, fmt.Errorf("routing table is not initialized")
+		return nil, Contact{}, fmt.Errorf("routing table is not initialized")
 	}
 	if kademlia.Network == nil {
-		return nil, fmt.Errorf("network is not initialized")
+		return nil, Contact{}, fmt.Errorf("network is not initialized")
 	}
 
 	target := NewKademliaID(hash)
 	if target == nil {
-		return nil, fmt.Errorf("invalid hash")
+		return nil, Contact{}, fmt.Errorf("invalid hash")
 	}
 
 	kademlia.ensureDataStore()
@@ -753,8 +818,9 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 		sum := sha256.Sum256(localValue)
 		calculatedKey := KademliaID(sum)
 		if validateValueSize(localValue) == nil && calculatedKey.String() == hash {
-			return localValue, nil
+			return localValue, kademlia.me(), nil
 		}
+		log.Printf("event=hash_error key=%s source=local", hash)
 	}
 
 	candidates := kademlia.closestContacts(target, kademlia.kValue())
@@ -765,6 +831,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 
 	seen := make(map[string]bool)
 	queried := make(map[string]bool)
+	failed := make(map[string]bool)
 
 	for _, contact := range candidates {
 		if contact.ID != nil {
@@ -780,7 +847,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 				continue
 			}
 			id := contact.ID.String()
-			if queried[id] {
+			if queried[id] || failed[id] {
 				continue
 			}
 
@@ -799,8 +866,9 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 		}
 
 		type lookupResult struct {
-			result findValueResult
-			err    error
+			result  findValueResult
+			err     error
+			contact Contact
 		}
 
 		results := make(chan lookupResult, len(toQuery))
@@ -810,7 +878,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 			contact := contact
 			go func() {
 				result, err := kademlia.sendFindValueRPC(contact, target)
-				results <- lookupResult{result: result, err: err}
+				results <- lookupResult{result: result, err: err, contact: contact}
 			}()
 		}
 
@@ -818,6 +886,8 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 		for i := 0; i < len(toQuery); i++ {
 			response := <-results
 			if response.err != nil {
+				kademlia.RoutingTable.Remove(response.contact)
+				failed[response.contact.ID.String()] = true
 				continue
 			}
 
@@ -830,8 +900,9 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 
 				// Acceptera bara värdet om hash(value) == key.
 				if calculatedKey.String() == target.String() {
-					return append([]byte(nil), response.result.Value...), nil
+					return append([]byte(nil), response.result.Value...), response.result.Source, nil
 				}
+				log.Printf("event=hash_error key=%s source=%s", hash, response.contact.Address)
 				continue
 			}
 
@@ -841,7 +912,7 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 					continue
 				}
 				id := contact.ID.String()
-				if seen[id] {
+				if seen[id] || failed[id] {
 					continue
 				}
 
@@ -852,10 +923,10 @@ func (kademlia *Kademlia) LookupData(hash string) ([]byte, error) {
 		}
 
 		sortContactsByDistance(candidates)
-		candidates = firstContacts(candidates, kademlia.kValue())
+		candidates = liveCandidates(candidates, failed)
 	}
 
-	return nil, fmt.Errorf("value not found")
+	return nil, Contact{}, fmt.Errorf("value not found")
 }
 
 // Lagrar data på de k närmaste noderna.
@@ -952,6 +1023,9 @@ func (kademlia *Kademlia) Join(bootstrap Contact) error {
 		return fmt.Errorf("invalid bootstrap contact")
 	}
 
+	if _, err := kademlia.Ping(bootstrap); err != nil {
+		return fmt.Errorf("bootstrap unreachable: %w", err)
+	}
 	kademlia.addContact(bootstrap)
 	me := kademlia.me()
 	if me.ID == nil {
@@ -961,11 +1035,11 @@ func (kademlia *Kademlia) Join(bootstrap Contact) error {
 	// Först hittar noden sina grannar.
 	kademlia.LookupContact(&me)
 
-	// Sedan refreshas alla 256 buckets.
-	for bucketIndex := 0; bucketIndex < IDLength*8; bucketIndex++ {
-		kademlia.Refresh(bucketIndex)
+	// Refresh each actual leaf range, including empty buckets. The dynamic tree
+	// need not contain 256 leaves; b controls how eligible buckets split.
+	for _, id := range kademlia.RoutingTable.RefreshTargets(0) {
+		kademlia.LookupContact(&Contact{ID: id})
 	}
-
 	return nil
 }
 
@@ -974,120 +1048,88 @@ func (kademlia *Kademlia) Refresh(bucketIndex int) {
 	if kademlia.RoutingTable == nil {
 		return
 	}
-	if bucketIndex < 0 || bucketIndex >= IDLength*8 {
+	if bucketIndex < 0 {
 		return
 	}
 
-	me := kademlia.me()
-	if me.ID == nil {
+	target := kademlia.RoutingTable.RefreshIDForBucket(bucketIndex)
+	if target == nil {
 		return
 	}
-
-	target := *me.ID
-	byteIndex := bucketIndex / 8
-	bitIndex := bucketIndex % 8
-
-	// Flippa den första biten som skiljer target från vårt eget ID.
-	mask := byte(1 << (7 - bitIndex))
-	target[byteIndex] ^= mask
-
-	// Randomisera alla mindre signifikanta bitar.
-	randomBytes := make([]byte, IDLength)
-	if _, err := rand.Read(randomBytes); err != nil {
-		return
-	}
-
-	for bit := bucketIndex + 1; bit < IDLength*8; bit++ {
-		b := bit / 8
-		position := bit % 8
-		bitMask := byte(1 << (7 - position))
-
-		if randomBytes[b]&bitMask != 0 {
-			target[b] |= bitMask
-		} else {
-			target[b] &^= bitMask
-		}
-	}
-
-	targetContact := NewContact(&target, "")
+	targetContact := NewContact(target, "")
 	kademlia.LookupContact(&targetContact)
 }
 
 // Söker efter noder med alpha parallella probes.
-func (kademlia *Kademlia) lookupContactParallel(target *KademliaID, count int) []Contact {
+func (kademlia *Kademlia) lookupContactParallel(target *KademliaID, count int) (answer []Contact) {
 	if count <= 0 || target == nil || kademlia.RoutingTable == nil || kademlia.Network == nil {
 		return nil
 	}
-
-	candidates := make([]Contact, 0, count)
-	seen := make(map[string]bool)
-	queried := make(map[string]bool)
+	defer func() { log.Printf("event=lookup_result type=node target=%s success=%t", target, len(answer) > 0) }()
+	kademlia.RoutingTable.SetCapacity(kademlia.kValue())
+	candidates := kademlia.closestContacts(target, count*kademlia.alpha())
+	seen, queried, failed := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	me := kademlia.me()
-
-	addContacts := func(contacts []Contact) {
-		for _, contact := range contacts {
-			if contact.ID == nil {
-				continue
-			}
-
-			// Lägg inte till oss själva i shortlist.
-			if me.ID != nil && contact.ID.Equals(me.ID) {
-				continue
-			}
-
-			key := contact.ID.String()
-			if seen[key] {
-				continue
-			}
-
-			contact.CalcDistance(target)
-			seen[key] = true
-			candidates = append(candidates, contact)
-		}
+	for _, c := range candidates {
+		seen[c.ID.String()] = true
+		c.CalcDistance(target)
 	}
-
-	initialContacts := kademlia.closestContacts(target, count)
-	addContacts(initialContacts)
-	sortContactsByDistance(candidates)
-	candidates = firstContacts(candidates, count)
-
 	for {
-		toQuery := make([]Contact, 0, kademlia.alpha())
-
-		for _, contact := range candidates {
-			if contact.ID == nil {
-				continue
-			}
-			id := contact.ID.String()
-			if queried[id] {
-				continue
-			}
-
-			toQuery = append(toQuery, contact)
-			if len(toQuery) == kademlia.alpha() {
-				break
-			}
-		}
-
-		if len(toQuery) == 0 {
-			break
-		}
-
-		for _, contact := range toQuery {
-			queried[contact.ID.String()] = true
-		}
-
-		responses := kademlia.queryContactsParallel(toQuery, target)
-
-		for _, response := range responses {
-			addContacts(response)
-		}
-
+		candidates = liveCandidates(candidates, failed)
 		sortContactsByDistance(candidates)
-		candidates = firstContacts(candidates, count)
+		shortlist := firstContacts(candidates, count)
+		batch := []Contact{}
+		for _, c := range shortlist {
+			if !queried[c.ID.String()] {
+				batch = append(batch, c)
+				if len(batch) == kademlia.alpha() {
+					break
+				}
+			}
+		}
+		if len(batch) == 0 {
+			return shortlist
+		}
+		type result struct {
+			contact  Contact
+			contacts []Contact
+			err      error
+		}
+		results := make(chan result, len(batch))
+		for _, c := range batch {
+			queried[c.ID.String()] = true
+			go func(c Contact) {
+				contacts, err := kademlia.sendFindNodeRPC(c, target)
+				results <- result{c, contacts, err}
+			}(c)
+		}
+		for range batch {
+			r := <-results
+			if r.err != nil {
+				failed[r.contact.ID.String()] = true
+				kademlia.RoutingTable.Remove(r.contact)
+				continue
+			}
+			for _, c := range r.contacts {
+				if c.ID == nil || c.ID.Equals(me.ID) || seen[c.ID.String()] {
+					continue
+				}
+				seen[c.ID.String()] = true
+				c.CalcDistance(target)
+				candidates = append(candidates, c)
+			}
+		}
 	}
+}
 
-	return candidates
+func liveCandidates(contacts []Contact, failed map[string]bool) []Contact {
+	result := make([]Contact, 0, len(contacts))
+	for _, c := range contacts {
+		if c.ID != nil && !failed[c.ID.String()] {
+			result = append(result, c)
+		}
+	}
+	return result
 }
 
 // Frågar flera noder samtidigt med strict parallelism.

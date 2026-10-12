@@ -128,6 +128,7 @@ func resilienceTrial(opts options, recorder *lookupRecorder, config string, s sc
 		}
 		contact := kademlia.NewContact(hashID(address), address)
 		node := &kademlia.Kademlia{RoutingTable: kademlia.NewRoutingTable(contact), Network: transport, Alpha: s.alpha, K: s.k, RPCTimeout: opts.timeout}
+		node.RoutingTable.SetCapacity(s.k)
 		return experimentNode{node: node, contact: contact, network: transport}, nil
 	}
 	for _, address := range randomAddresses(rng, count) {
@@ -137,14 +138,15 @@ func resilienceTrial(opts options, recorder *lookupRecorder, config string, s sc
 		}
 		nodes = append(nodes, node)
 	}
-	for i := range nodes {
-		for j := range nodes {
-			if i != j {
-				nodes[i].node.RoutingTable.AddContact(nodes[j].contact)
-			}
-		}
-		go nodes[i].node.ListenForRPC()
+	for _, entry := range nodes {
+		go entry.node.ListenForRPC()
 	}
+	for i := 1; i < len(nodes); i++ {
+		if err := nodes[i].node.Join(nodes[0].contact); err != nil {
+			return trialResult{}, err
+		}
+	}
+
 	value := randomBytes(rng, opts.valueBytes)
 	key, storeErr := nodes[0].node.Store(value)
 	result := trialResult{}
@@ -169,27 +171,22 @@ func resilienceTrial(opts options, recorder *lookupRecorder, config string, s sc
 		nodes[i] = fresh
 		result.joins++
 	}
-	// Seed replacement routing tables from current membership. Survivors retain
-	// stale contacts; new nodes have no values. No background repair is simulated.
+	// Start replacement listeners, then join through another current member.
 	if result.joins > 0 {
-		for i := range nodes {
-			if !strings.HasPrefix(nodes[i].contact.Address, "172.16.") {
-				continue
-			}
-			for j := range nodes {
-				if i != j {
-					nodes[i].node.RoutingTable.AddContact(nodes[j].contact)
-				}
-			}
-		}
-		// Existing listeners stopped on Close; only replacements need new loops.
-		// Identify replacements by their 172.16 prefix.
 		for i := range nodes {
 			if strings.HasPrefix(nodes[i].contact.Address, "172.16.") {
 				go nodes[i].node.ListenForRPC()
 			}
 		}
+		for i := range nodes {
+			if strings.HasPrefix(nodes[i].contact.Address, "172.16.") {
+				if err := nodes[i].node.Join(nodes[(i+1)%len(nodes)].contact); err != nil {
+					return result, err
+				}
+			}
+		}
 	}
+
 	c.mu.Lock()
 	c.loss, c.latency = s.loss, s.latency
 	c.requests = make(map[string]*requestTiming)
@@ -317,7 +314,7 @@ func runResilience(opts options) error {
 		return err
 	}
 	var report strings.Builder
-	report.WriteString("# Resilience experiment results\n\nSee [experiment documentation](../README.md) for controls and limitations. Timing includes timeout waits. Each trial uses a fresh network; storage occurs before impairments. Churn is a discrete simulated exposure, not continuous changes during RPCs.\n\nExpected behavior: successful RPC time is roughly twice one-way latency; packet loss increases missing responses and timeout costs. Increasing alpha should reduce sequential rounds at a similar probe count, though wider batches can send more probes. Higher churn removes stored replicas; larger k improves replica survival but also changes routing shortlist size. Compare enough seeds and trials before drawing conclusions. Successful-response mean RTT excludes missing responses.\n\n| axis | nodes | alpha | k | loss | latency ms | churn /node/s | samples | success rate | mean probes | mean elapsed ms | response fraction | mean RTT ms |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	report.WriteString("# Resilience experiment results\n\nSee [experiment documentation](../README.md) for controls and limitations. Timing includes timeout waits. Each trial uses a fresh network; storage occurs before impairments. Churn is a discrete simulated exposure, not continuous changes during RPCs.\n\nExpected behavior: successful RPC time is roughly twice one-way latency; packet loss increases missing responses and timeout costs. Increasing alpha should reduce sequential rounds at a similar probe count, though wider batches can send more probes. Higher churn removes stored replicas; larger k improves replica survival but also changes routing shortlist size. Compare enough seeds and trials before drawing conclusions. Successful-response mean RTT excludes missing responses.\n\n| axis | nodes | alpha | k | loss | latency ms | churn /node/s | samples | success rate | mean probes | probe variance | success variance | mean elapsed ms | response fraction | mean RTT ms |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for index, s := range scenarios {
 		for _, count := range opts.nodeCounts {
 			var summary stats
@@ -359,7 +356,7 @@ func runResilience(opts options) error {
 			if responseCount > 0 {
 				meanRTT = formatFloat(responseMS / float64(responseCount))
 			}
-			fmt.Fprintf(&report, "| %s | %d | %d | %d | %.3f | %.3f | %.3f | %d | %.4f | %.4f | %.4f | %s | %s |\n", s.axis, count, s.alpha, s.k, s.loss, float64(s.latency)/float64(time.Millisecond), s.churn, summary.Count, float64(summary.Successes)/float64(summary.Count), summary.ProbeMean, elapsed/float64(summary.Count), responseFraction, meanRTT)
+			fmt.Fprintf(&report, "| %s | %d | %d | %d | %.3f | %.3f | %.3f | %d | %.4f | %.4f | %.4f | %.4f | %.4f | %s | %s |\n", s.axis, count, s.alpha, s.k, s.loss, float64(s.latency)/float64(time.Millisecond), s.churn, summary.Count, float64(summary.Successes)/float64(summary.Count), summary.ProbeMean, summary.probeVariance(), successVariance(summary.Successes, summary.Count), elapsed/float64(summary.Count), responseFraction, meanRTT)
 		}
 	}
 	w.Flush()
@@ -371,4 +368,12 @@ func runResilience(opts options) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "report.md"), []byte(report.String()), 0644)
+}
+
+func successVariance(successes, count int) float64 {
+	if count < 2 {
+		return 0
+	}
+	p := float64(successes) / float64(count)
+	return p * (1 - p) * float64(count) / float64(count-1)
 }

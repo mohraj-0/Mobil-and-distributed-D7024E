@@ -612,6 +612,9 @@ func TestJoinSuccess(t *testing.T) {
 		if err := json.Unmarshal(data, &request); err != nil {
 			return err
 		}
+		if request.Type == "PING" {
+			node.handlePingReply(rpcMessage{RequestID: request.RequestID, SenderID: bootstrap.ID.String(), SenderAddress: bootstrap.Address})
+		}
 		if request.Type == rpcFindNode {
 			node.handleFindNodeReplyRPC(rpcMessage{
 				Type: rpcFindNodeReply, RequestID: request.RequestID,
@@ -630,7 +633,7 @@ func TestJoinSuccess(t *testing.T) {
 	}
 }
 
-func TestJoinPerformsSelfLookupAndAllBucketRefreshes(t *testing.T) {
+func TestJoinPerformsSelfLookupAndLeafBucketRefreshes(t *testing.T) {
 	bootstrap := NewContact(testID("11"), "node-b")
 	var node *Kademlia
 	network := &callbackNode{}
@@ -641,6 +644,9 @@ func TestJoinPerformsSelfLookupAndAllBucketRefreshes(t *testing.T) {
 		var request rpcMessage
 		if err := json.Unmarshal(data, &request); err != nil {
 			return err
+		}
+		if request.Type == "PING" {
+			node.handlePingReply(rpcMessage{RequestID: request.RequestID, SenderID: bootstrap.ID.String(), SenderAddress: bootstrap.Address})
 		}
 		if request.Type == rpcFindNode {
 			findNodeRequests++
@@ -655,9 +661,9 @@ func TestJoinPerformsSelfLookupAndAllBucketRefreshes(t *testing.T) {
 	if err := node.Join(bootstrap); err != nil {
 		t.Fatalf("Join failed: %v", err)
 	}
-	want := IDLength*8 + 1
+	want := 2 // self lookup and the single actual leaf range
 	if findNodeRequests != want {
-		t.Fatalf("Join sent %d FIND_NODE requests, want self lookup plus 256 bucket refreshes = %d", findNodeRequests, want)
+		t.Fatalf("Join sent %d FIND_NODE requests, want self lookup plus leaf bucket refresh = %d", findNodeRequests, want)
 	}
 }
 
@@ -855,6 +861,7 @@ func TestThousandNodesCommunicateOverSimulatedNetwork(t *testing.T) {
 	}
 	// Give each node a small initial set of peers, avoiding a million-contact setup.
 	for i, node := range nodes {
+		node.RoutingTable.SetCapacity(node.K)
 		for bit := 0; bit < 10; bit++ {
 			peer := i ^ (1 << bit)
 			if peer < nodeCount {
@@ -888,10 +895,17 @@ func TestThousandNodesCommunicateOverSimulatedNetwork(t *testing.T) {
 					results <- fmt.Errorf("node %d -> node %d: %w", i, peer, err)
 					continue
 				}
-				matched := false
-				for _, contact := range found {
-					if contact.ID != nil && contact.ID.Equals(contacts[i].ID) && contact.Address == contacts[i].Address {
-						matched = true
+				// A full live bucket may legitimately decline the requesting node.
+				// Validate the actual FIND_NODE contract: at most k valid contacts
+				// ordered by XOR distance, rather than guaranteed requester inclusion.
+				matched := len(found) > 0 && len(found) <= nodes[peer].K
+				for j, contact := range found {
+					if contact.ID == nil || contact.Address == "" {
+						matched = false
+						break
+					}
+					if j > 0 && contact.ID.CalcDistance(contacts[i].ID).Less(found[j-1].ID.CalcDistance(contacts[i].ID)) {
+						matched = false
 					}
 				}
 				if !matched {
