@@ -1,4 +1,4 @@
-package kademlia
+package registry
 
 import (
 	"crypto/ed25519"
@@ -59,21 +59,6 @@ type unsignedLatestPointer struct {
 	Version           uint64 `json:"version"`
 	VersionRecordHash string `json:"version_record_hash"`
 }
-
-func Install(
-    registry *systemTXTResolver,
-	// registry *FakeTXTResolver
-    domain, pkg, version string,
-) error {
-	//    var record *VersionRecord
-	//
-	//    if version == "latest" {
-	// 	var latest_version = 		
-	//
-	// } 
-	return fmt.Errorf("TODO")
-}
-
 
 // SignVersionRecord signerar en VersionRecord.
 //
@@ -441,18 +426,18 @@ func DecodePublicKey(encoded string) (ed25519.PublicKey, error) {
 //
 // Om provider saknas eller lookup misslyckas avvisas recorden.
 // Noden accepterar aldrig en public key från själva uppdateringen.
-func (kademlia *Kademlia) VerifyOwnedVersionRecord(
+func (r *Registry) VerifyOwnedVersionRecord(
 	record *VersionRecord,
 ) error {
 	if record == nil {
 		return fmt.Errorf("version record is nil")
 	}
 
-	if kademlia.OwnershipVerifier == nil {
+	if r.OwnershipVerifier == nil {
 		return fmt.Errorf("ownership verifier is not configured")
 	}
 
-	publicKey, err := kademlia.OwnershipVerifier.ResolvePublicKey(
+	publicKey, err := r.OwnershipVerifier.ResolvePublicKey(
 		record.Domain,
 	)
 	if err != nil {
@@ -479,18 +464,18 @@ func (kademlia *Kademlia) VerifyOwnedVersionRecord(
 //
 // Public key hämtas alltid från ownership-providern,
 // aldrig från själva uppdateringen.
-func (kademlia *Kademlia) VerifyOwnedLatestPointer(
+func (r *Registry) VerifyOwnedLatestPointer(
 	pointer *LatestPointer,
 ) error {
 	if pointer == nil {
 		return fmt.Errorf("latest pointer is nil")
 	}
 
-	if kademlia.OwnershipVerifier == nil {
+	if r.OwnershipVerifier == nil {
 		return fmt.Errorf("ownership verifier is not configured")
 	}
 
-	publicKey, err := kademlia.OwnershipVerifier.ResolvePublicKey(
+	publicKey, err := r.OwnershipVerifier.ResolvePublicKey(
 		pointer.Domain,
 	)
 	if err != nil {
