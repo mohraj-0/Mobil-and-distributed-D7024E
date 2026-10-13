@@ -1,5 +1,11 @@
 # Unified Part 1 and Part 2 CLI
 
+For commands with a plain explanation and expected result for each test, use the
+[Part 1 and Part 2 CLI test guides](tests/README.md). They cover valid and invalid
+inputs, ten updates of one package file, `--force`, and real UDP with and without
+Docker, plus a persistent simulated network, using a repeatable fake DNS ownership
+configuration.
+
 `go run ./cmd/simshell` is the single CLI for the Kademlia DHT and package
 registry. Run without a subcommand for the interactive prompt, or pass the same
 commands directly to Cobra. Both modes use the same handlers and node. For
