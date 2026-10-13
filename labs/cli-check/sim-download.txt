@@ -1,1 +1,21 @@
-release 1
+BLUEBERRY PIE
+Version: 1
+Change: Initial blueberry pie recipe.
+
+Ingredients:
+- 500 g blueberries
+- 150 g sugar
+- 2 tablespoons cornstarch
+- 300 g flour
+- 150 g cold butter
+- 5 tablespoons cold water
+
+Method:
+1. Rub the butter into the flour, then mix in the cold water to form dough.
+2. Roll out the dough.
+3. Line a pie dish with half the dough. Reserve the rest for the top.
+4. Mix blueberries, sugar and cornstarch. Spoon the filling into the pie dish.
+5. Cover with the remaining dough and cut small steam vents.
+6. Leave the top crust unglazed.
+7. Bake in a preheated oven at 180 C for 40 minutes, until golden and bubbling.
+8. Let the pie cool before serving.

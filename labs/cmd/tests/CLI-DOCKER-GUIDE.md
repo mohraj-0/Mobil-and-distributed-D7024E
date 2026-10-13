@@ -2,7 +2,7 @@
 
 Run PowerShell in `labs`. Uses fake DNS ownership. Probe logs are saved separately; replication experiments are omitted.
 
-`d` runs a fresh real UDP client for each command; the independent servers keep the data.
+`d` runs a fresh real UDP client for each command; the independent servers keep the data. Use two PowerShell terminals: terminal 1 writes and publishes; terminal 2 retrieves and verifies through the same 50-server network.
 
 ## What changes in the recipe
 
@@ -78,7 +78,7 @@ docker exec $bootstrap chmod 600 /tmp/cli-check/owner.key
 # Each call launches a fresh UDP client on port 9000.
 # Save probe messages in the container, keeping command output visible.
 function d {
-    docker exec $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell "$@" 2>>/tmp/cli-check/client.log' demo --publisher-key /tmp/cli-check/owner.key @args
+    docker exec -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell "$@" 2>>/tmp/cli-check/client.log' demo --publisher-key /tmp/cli-check/owner.key @args
     if ($LASTEXITCODE -ne 0) { docker exec $bootstrap tail -n 1 /tmp/cli-check/client.log }
 }
 
@@ -106,9 +106,66 @@ function Read-DemoFile([string]$path) { (docker exec $bootstrap cat $path) -join
 
 Each `Update-Release N` prints the full updated host recipe and its hash, copies it into Docker, then prints the container recipe too. Run the helper setup again to replace the old function.
 
+## Terminal 2: independent reader
+
+Run the preparation and network startup above in terminal 1 only. In a second PowerShell terminal in `labs`, run:
+
+```powershell
+$bootstrap = docker ps --filter 'label=com.docker.swarm.service.name=kadlab_kademlia-bootstrap' --format '{{.ID}}'
+if (@($bootstrap).Count -ne 1) { throw 'Expected one running bootstrap container' }
+function d {
+    docker exec -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell "$@" 2>>/tmp/cli-check/reader.log' demo @args
+    if ($LASTEXITCODE -ne 0) { docker exec $bootstrap tail -n 1 /tmp/cli-check/reader.log }
+}
+$release = '/tmp/cli-check/release.txt'
+$download = '/tmp/cli-check/reader-download.txt'
+$binary = '/tmp/cli-check/binary.bin'
+$binaryCopy = '/tmp/cli-check/reader-binary-copy.bin'
+$pingAddress = 'kademlia-bootstrap:8000'
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+. ./cmd/tests/recipe-demo.ps1
+function Read-DemoFile([string]$path) { (docker exec $bootstrap cat $path) -join "`n" }
+```
+
+The clients use different UDP ports (9000 and 9001) and independent node identities. Both join the servers on port 8000. Terminal 2 needs no signing key. Keep the stack running; do not redeploy between writing and reading. These commands run in PowerShell, not at `simnet>`.
+
+## Which terminal runs each test
+
+Run the following sections in order, switching terminals at the indicated commands. Variables and functions belong to each PowerShell session; copy the full hash printed by terminal 1 into terminal 2 as `$key = 'HASH'` (and `$binaryKey = 'HASH'` for binary data).
+
+| Operation in the remaining sections | Terminal |
+|---|---|
+| `Update-Release`, `put`, `publish`, and wrong-owner publication attempts | 1: writer |
+| `get`, `install`, `show example.com:demo`, `show example.com:intruder`, and download checks | 2: reader |
+| `ping`, `show rt`, `show dns`, malformed input, and missing-value checks | Either terminal |
+| Interactive `show ds` demonstration | 1; it inspects that client's local store |
+| Targeted Go tests and final cleanup | 1, after both clients finish |
+
+For example, terminal 1 runs `d put $release`. Copy its printed hash into terminal 2, then run `d get $key $download` and `(Read-DemoFile $download) -ceq (Get-RecipeText 1)` there; expect `True`. Repeat with binary data. For the existing binary verification block, use the reader's container output:
+
+```powershell
+# Terminal 2: compare the uploaded and retrieved binary bytes. Expect equal hashes.
+docker exec $bootstrap sha256sum $binary $binaryCopy
+```
+
+For Part 2, terminal 1 runs each `Update-Release N` and publication. After each publication succeeds, terminal 2 runs:
+
+```powershell
+# Replace 1 with the version just published; repeat for all versions 1 through 10.
+$version = 1
+d show example.com:demo
+d install "example.com:demo:$version" --output $download
+Read-DemoFile $download
+(Read-DemoFile $download) -ceq (Get-RecipeText $version)
+d install example.com:demo:latest --output $download
+(Read-DemoFile $download) -ceq (Get-RecipeText $version)
+```
+
+After all ten publications, run the historical install loop below in terminal 2. After each rejected rollback, fork, forced update, or wrong-owner attempt in terminal 1, check history and latest again in terminal 2: latest must remain 10 and the intruder package must remain absent. Terminal 2 can still retrieve after terminal 1's interactive client exits, because the servers retain the data. `show ds` only shows the current client's store; an empty reader store does not mean the network lost the value.
+
 ## Part 1
 
-Run these in PowerShell after the setup above. Each download uses a fresh client, so it retrieves from the servers.
+Run these in PowerShell after setting up both terminals, following the terminal assignment table above. Each download uses a fresh reader client, so it retrieves from the servers. Calculate hashes in terminal 1 and copy them into terminal 2 before `get`.
 
 ```powershell
 # Ping a real UDP server. Expect pong and round-trip time.
@@ -163,10 +220,10 @@ Run these in **PowerShell from `labs`**, after `get` reports that the file was s
 
 ```powershell
 # Copy the downloaded binary back to the host.
-docker cp "${bootstrap}:/tmp/cli-check/binary-copy.bin" cli-check/binary-copy.bin
+docker cp "${bootstrap}:$binaryCopy" cli-check/reader-binary-copy.bin
 
 # Expect True: every byte survived the upload/download.
-(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/binary-copy.bin).Hash
+(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/reader-binary-copy.bin).Hash
 ```
 
 Check the documented file-size limit from PowerShell:
@@ -192,6 +249,8 @@ d put /tmp/cli-check/oversize.bin
 ## Part 2: update one file through ten versions
 
 Every valid publication should print replica acceptance and `published`.
+
+Run updates and publications in terminal 1. After each succeeds, run the per-version reader checks above in terminal 2. From `d show example.com:demo` onward in this block, run commands in terminal 2, including the historical install loop.
 
 ```powershell
 # Show the owner's public key from the configured DNS verifier.
@@ -273,6 +332,8 @@ Check `docker exec $bootstrap cat /app/demo-1.pkg`: it must print the full versi
 
 Latest must remain **10**. Force skips sender preflight; receivers still validate. Failed attempts may leave immutable blobs/records, but must not change accepted history.
 
+Run publication attempts in terminal 1. Run installs, history checks, and content comparisons in terminal 2 to verify the network still serves version 10.
+
 ```powershell
 # Rollback without force: sender must reject before upload.
 d publish example.com:demo:5 $release
@@ -320,6 +381,8 @@ d install example.com:demo:latest --output $download
 
 ### Wrong owner
 
+Run both wrong-owner publication attempts in terminal 1; run the final intruder lookup in terminal 2.
+
 ```powershell
 # Supply the other signer for the attack test.
 docker cp cli-check/other.key "${bootstrap}:/tmp/cli-check/other.key"
@@ -358,7 +421,7 @@ At `simnet>`, run each command separately:
 | `show rt` | Displays populated routing buckets. |
 | `exit` | Ends the client and returns to PowerShell. |
 
-Back in PowerShell, `d install example.com:demo:latest --output $download` must still install version 10 from the servers after the interactive client exits.
+In terminal 2's PowerShell, `d install example.com:demo:latest --output $download` must still install version 10 from the servers after terminal 1's interactive client exits.
 
 ## Conditions the CLI cannot directly create
 

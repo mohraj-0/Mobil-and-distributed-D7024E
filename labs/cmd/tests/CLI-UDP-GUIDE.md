@@ -54,7 +54,7 @@ Use a fresh package name instead of `demo` if repeating against a network with a
 
 ## Start the UDP network
 
-Use three PowerShell terminals in `labs`. Keep the two servers running.
+Use four PowerShell terminals in `labs`: two persistent servers, one writer client, and one reader client. The writer and reader communicate through the same UDP network. Keep the two servers running.
 
 Terminal 1:
 
@@ -70,7 +70,7 @@ Terminal 2:
 .\cli-check\kadlab.exe --transport udp --addr 127.0.0.1:8001 --bootstrap-addr 127.0.0.1:8000 --owners-file cli-check/owners.json serve 2>> cli-check/server2.log
 ```
 
-Terminal 3:
+Terminal 3 (writer):
 
 ```powershell
 # Configure every client to join the real UDP network with the correct signer.
@@ -97,13 +97,63 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 function Read-DemoFile([string]$path) { [IO.File]::ReadAllText((Join-Path $PWD $path)) }
 ```
 
-Continue with the Part 1 tests in terminal 3. Ports 8000, 8001 and 9000 must be available.
+Terminal 4 (reader), in PowerShell from `labs`:
+
+```powershell
+# Independent client: different port, same bootstrap; no signing key needed.
+$nodeArgs = @('--transport','udp','--addr','127.0.0.1:9001','--bootstrap-addr','127.0.0.1:8000','--owners-file','cli-check/owners.json')
+function d {
+    & .\cli-check\kadlab.exe @nodeArgs @args 2>> cli-check/reader.log
+    if ($LASTEXITCODE -ne 0) { Get-Content cli-check/reader.log -Tail 1 }
+}
+$download = 'cli-check/reader-download.txt'
+$binaryCopy = 'cli-check/reader-binary-copy.bin'
+$pingAddress = '127.0.0.1:8000'
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+. ./cmd/tests/recipe-demo.ps1
+function Read-DemoFile([string]$path) { [IO.File]::ReadAllText((Join-Path $PWD $path)) }
+```
+
+Ports 8000, 8001, 9000 and 9001 must be available. These are PowerShell commands, not interactive `simnet>` commands. Every `d` call creates a fresh client; the servers preserve values between calls.
+
+## Which client terminal runs each test
+
+Follow the remaining sections in order, splitting their commands as follows. PowerShell variables are local to each terminal: copy the full hash printed by a writer `put` into the reader as `$key = 'HASH'`, or `$binaryKey = 'HASH'` for binary input.
+
+| Operation | Terminal |
+|---|---|
+| `Update-Release`, `put`, `publish`, and wrong-owner publication attempts | 3: writer |
+| `get`, `install`, history checks, intruder checks, and download verification | 4: reader |
+| `ping`, `show rt`, `show dns`, invalid-input and missing-value checks | Either client |
+| Interactive `show ds` demonstration | 3: writer; it shows this client's local data |
+| Targeted Go tests | Either PowerShell client terminal after leaving the interactive prompt |
+
+Part 1: terminal 3 runs `d put $release`; terminal 4 sets `$key` to the printed hash, then runs `d get $key $download`. Verify the text there with `(Read-DemoFile $download) -ceq (Get-RecipeText 1)`. For binary data, upload in terminal 3 and retrieve in terminal 4 using the new binary hash. Verify in terminal 4:
+
+```powershell
+# Expect True; reader output has its own filename.
+(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash $binaryCopy).Hash
+```
+
+Part 2: terminal 3 updates and publishes each version. After each successful publication, terminal 4 runs the following, changing `$version` to the version just published (1 through 10):
+
+```powershell
+$version = 1
+d show example.com:demo
+d install "example.com:demo:$version" --output $download
+Read-DemoFile $download
+(Read-DemoFile $download) -ceq (Get-RecipeText $version)
+d install example.com:demo:latest --output $download
+(Read-DemoFile $download) -ceq (Get-RecipeText $version)
+```
+
+Run the full historical install loop in terminal 4 after version 10 is published. For every invalid or forced publication in terminal 3, verify history and latest from terminal 4; latest must remain 10. After wrong-owner attempts, terminal 4's `d show example.com:intruder` must report no accepted package. After terminal 3 exits its interactive client, terminal 4 must still be able to install from the servers. `show ds` inspects only the current client's local store; it is not a list of all values in the network.
 
 Each `Update-Release N` prints the full saved blueberry pie recipe, its change description and hash before publication. Run the helper setup again to replace the old function. In this UDP setup, updates appear in **terminal 3**; terminal 2 runs a server.
 
 ## Part 1
 
-Run these in PowerShell after the setup above. Each download uses a fresh client, so it retrieves from the servers.
+Run these in PowerShell after setting up both clients, using the terminal assignment table above. Calculate hashes in terminal 3 and copy them into terminal 4 before downloads. Each download uses a fresh reader client, so it retrieves from the servers.
 
 ```powershell
 # Ping a real UDP server. Expect pong and round-trip time.
@@ -158,7 +208,7 @@ Run this in **PowerShell from `labs`**, after `get` reports that the file was sa
 
 ```powershell
 # Expect True: every byte survived the upload/download.
-(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/binary-copy.bin).Hash
+(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash $binaryCopy).Hash
 ```
 
 Check the documented file-size limit from PowerShell:
@@ -180,6 +230,8 @@ d put cli-check/oversize.bin
 ## Part 2: update one file through ten versions
 
 Every valid publication should print replica acceptance and `published`.
+
+Run updates and publications in terminal 3. After each succeeds, run the per-version reader checks above in terminal 4. From `d show example.com:demo` onward in this block, run commands in terminal 4, including the historical install loop.
 
 ```powershell
 # Show the owner's public key from the configured DNS verifier.
@@ -261,6 +313,8 @@ Check `[IO.File]::ReadAllText("$PWD/demo-1.pkg") -ceq (Get-RecipeText 1)`: it mu
 
 Latest must remain **10**. Force skips sender preflight; receivers still validate. Failed attempts may leave immutable blobs/records, but must not change accepted history.
 
+Run publication attempts in terminal 3. Run installs, history checks, and content comparisons in terminal 4 to verify the network still serves version 10.
+
 ```powershell
 # Rollback without force: sender must reject before upload.
 d publish example.com:demo:5 $release
@@ -308,6 +362,8 @@ d install example.com:demo:latest --output $download
 
 ### Wrong owner
 
+Run both wrong-owner publication attempts in terminal 3; run the final intruder lookup in terminal 4.
+
 ```powershell
 # Configure the same network with the other signer.
 $wrongArgs = @('--transport','udp','--addr','127.0.0.1:9000','--bootstrap-addr','127.0.0.1:8000','--owners-file','cli-check/owners.json','--publisher-key','cli-check/other.key')
@@ -346,7 +402,7 @@ At `simnet>`, run each command separately:
 | `show rt` | Displays populated routing buckets. |
 | `exit` | Ends the client and returns to PowerShell. |
 
-Back in PowerShell, `d install example.com:demo:latest --output $download` must still install version 10 from the servers after the interactive client exits.
+In terminal 4's PowerShell, `d install example.com:demo:latest --output $download` must still install version 10 from the servers after terminal 3's interactive client exits.
 
 ## Conditions the CLI cannot directly create
 

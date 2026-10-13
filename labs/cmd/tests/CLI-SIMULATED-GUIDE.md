@@ -2,6 +2,12 @@
 
 This guide uses **10 simulated nodes in one process**, fake DNS ownership and one text recipe updated through ten versions. Run both PowerShell terminals from `labs`. No UDP or Docker engine is needed. Probe logs are saved separately.
 
+## Two terminals and network communication
+
+The current simulated transport shares data only between nodes inside one process. A second `--transport simulated` CLI creates an independent network, even with the same addresses and ownership file. It cannot retrieve terminal 1's values or package history. Here terminal 2 edits recipe files and checks downloads; all network commands run in terminal 1.
+
+For two independent terminals that exchange values, publications, history, and installs through a network, follow [UDP without Docker](CLI-UDP-GUIDE.md) for a local network, or [UDP with 50 Docker servers](CLI-DOCKER-GUIDE.md). Both guides assign writes and publication attempts to a writer terminal and reads and verification to a reader terminal, including all ten versions and rejected updates. Local UDP uses real sockets, so it is a different transport from the in-process simulation. Sharing a pure simulated network between terminal processes would require an implementation change; Markdown instructions alone cannot enable it.
+
 ## What changes in the blueberry pie recipe
 
 `cli-check/release.txt` contains the actual recipe uploaded by `put` and `publish`. Each version keeps the earlier improvements:
