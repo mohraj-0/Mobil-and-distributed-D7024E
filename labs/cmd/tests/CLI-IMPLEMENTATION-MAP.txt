@@ -1,0 +1,196 @@
+PART 1 AND PART 2 CLI IMPLEMENTATION MAP
+Repository: C:\Users\natan\Desktop\Mobile\Mobil-and-distributed-D7024E
+File paths below are relative to the repository root.
+Line numbers refer to the source inspected when this document was generated.
+
+COMMON CLI ENTRY AND COMMAND HANDLING
+
+labs/cmd/simshell/main.go:52 - main()
+  Creates the CLI, executes the command, closes resources and reports errors.
+labs/cmd/simshell/main.go:63 - root()
+  Registers commands and startup flags using Cobra.
+labs/cmd/simshell/main.go:294 - repl()
+  Reads commands at simnet>. Splits input on whitespace.
+labs/cmd/simshell/main.go:315 - dispatch()
+  Executes the same command handlers as one-shot mode. Resets --force, --prev
+  and --output between commands so flags do not accidentally carry over.
+
+PART 1: KADEMLIA CLI
+
+1. ping IP:PORT
+   Registration: labs/cmd/simshell/main.go:105
+   Handler: labs/cmd/simshell/main.go:466 - ping()
+   Address validation: labs/cmd/simshell/main.go:625 - parseAddress()
+   Network operation: labs/kademlia/maintenance.go:22 - Ping()
+   Validates the address, pings the peer, and prints pong plus round-trip time.
+
+2. put FILENAME (alias: store)
+   Registration: labs/cmd/simshell/main.go:111
+   Handler: labs/cmd/simshell/main.go:480 - put()
+   Storage: labs/kademlia/kademlia.go:944 - Store()
+   Reads the file, calculates SHA-256, stores on up to k closest nodes and
+   prints the full content key. Store checks the supported value size.
+   The current node stores a copy only if it is among the selected nodes.
+
+3. get KEY [FILENAME]
+   Registration: labs/cmd/simshell/main.go:114
+   Handler: labs/cmd/simshell/main.go:493 - get()
+   Key validation: labs/cmd/simshell/main.go:617 - validKey()
+   Lookup: labs/kademlia/kademlia.go:795 - LookupDataFrom()
+   Validates the 64-character hex key, retrieves bytes and checks their hash.
+   Prints the source node. Prints the value when no filename is supplied;
+   otherwise writes the bytes to the requested file.
+
+4. show rt
+   Registration: labs/cmd/simshell/main.go:345
+   Handler: labs/cmd/simshell/main.go:521 - showTo(), case "rt"
+   Takes a routing-table snapshot, sorts populated buckets and prints contacts.
+   Skips empty buckets and abbreviates IDs for readable output.
+
+5. show ds
+   Registration: labs/cmd/simshell/main.go:348
+   Handler: labs/cmd/simshell/main.go:521 - showTo(), case "ds"
+   Local snapshot: labs/kademlia/maintenance.go:95 - DataSnapshot()
+   Entry formatting: labs/cmd/simshell/registry.go:117 - displayStoredValue()
+   Sorts and displays the current node's stored keys. Prints an empty-store
+   message when there are no entries. Blob entries include their byte count.
+   It does not display all nodes' stores and does not query the network.
+   For a visible demo, use put then show ds in one interactive session.
+   With a healthy simulated network, --nodes 50 --k 50 includes the local node.
+
+6. exit (alias: quit)
+   Registration and handler: labs/cmd/simshell/main.go:123
+   Cleanup: labs/cmd/simshell/main.go:569 - close()
+   Closes network resources, stops maintenance and exits the process.
+   In simulated mode, all nodes in that process end together.
+
+PART 2: PACKAGE REGISTRY CLI
+
+1. publish [--force] [--prev=VERSION] DOMAIN:PACKAGE:VERSION FILENAME
+   Registration and publication flags:
+     labs/cmd/simshell/registry.go:153 - publishCmd()
+   Main handler: labs/cmd/simshell/registry.go:179 - publish()
+   Name parsing: labs/cmd/simshell/registry.go:49 - packageName()
+                 labs/cmd/simshell/registry.go:165 - versionName()
+   Reads the private signing key and package bytes. Without --force, checks
+   ownership, increasing version and extension of the current latest record.
+   Stores the blob, signs/stores a version record, then signs/publishes a latest
+   pointer. Prints individual replica acceptance/rejection results.
+   Blob storage: labs/registry/registry.go:86 - StoreBlob()
+   Version-record storage: labs/registry/registry.go:96 - StoreVersionRecord()
+   Signing: labs/metadata/records.go:71 - SignVersionRecord()
+            labs/metadata/records.go:117 - SignLatestPointer()
+   Normal publication: labs/kademlia/latest.go:252 - PublishLatest()
+   Forced publication: labs/kademlia/latest.go:258 - PublishLatestForced()
+
+   --prev
+   Handled inside publish(). Chooses a predecessor by published version.
+   0 means genesis. With --force, a 64-character record hash is also accepted.
+   Without --prev, the current latest record is selected automatically.
+
+   --force
+   Handled inside publish(). Bypasses publisher ownership/history preflight
+   and the normal authenticated version-record storage path so invalid updates
+   can be attempted. It does not bypass parsing, signing or receiver validation.
+
+   Receiver validation (the security checks behind publication):
+     labs/kademlia/latest.go:33 - verifyLatest()
+       Validates pointer/key binding, ownership, referenced history and version.
+     labs/kademlia/latest.go:95 - acceptLatest()
+       Authenticates the proposed pointer before committing it.
+     labs/kademlia/latest.go:107 - commitLatest()
+       Locks the package and rejects rollback, same-version replacement and
+       histories not containing the current accepted record. Exact replay is
+       accepted without changing the head.
+     labs/kademlia/latest.go:139 - handleLatestRPC()
+       Receives UPDATE_LATEST and sends acceptance/rejection back to the sender.
+     labs/metadata/history.go:50 - TraverseHistory()
+       Checks hashes/signatures, package identity, predecessor links, strictly
+       increasing versions and cycle/traversal guards.
+
+2. install DOMAIN:PACKAGE:VERSION [--output FILE]
+   Registration: labs/cmd/simshell/registry.go:296 - installCmd()
+   Handler: labs/cmd/simshell/registry.go:307 - install()
+   History helper: labs/cmd/simshell/registry.go:61 - history()
+   Latest lookup/catch-up: labs/kademlia/latest.go:302 - LookupLatest()
+   Blob retrieval: labs/kademlia/kademlia.go:795 - LookupDataFrom()
+   Authenticates history and selects the requested integer version or latest.
+   Retrieves the blob, checks SHA-256 and writes its bytes to disk.
+   Default output is PACKAGE-VERSION.pkg; --output chooses another filename.
+   Does not execute the package or resolve dependencies.
+
+3. show DOMAIN:PACKAGE
+   Registration: labs/cmd/simshell/main.go:340 - showCmd()
+   Handler: labs/cmd/simshell/registry.go:73 - showHistory()
+   History helper: labs/cmd/simshell/registry.go:61 - history()
+   Traversal: labs/registry/registry.go:155 - TraverseHistory()
+              labs/metadata/history.go:50 - TraverseHistory()
+   Verifies the entire history before printing newest-first versions, shortened
+   record/blob hashes and predecessor information. Genesis marks the first record.
+
+4. show dns DOMAIN
+   Registration: labs/cmd/simshell/main.go:354
+   Handler: labs/cmd/simshell/registry.go:90 - showDNS()
+   Ownership resolution: labs/metadata/dns.go:51 - ResolvePublicKey()
+   Prints the full public key trusted for the domain or an ownership lookup error.
+   Uses the node's configured verifier: real DNS or the fake DNS owners file.
+
+5. show ds (Part 2 extension)
+   Formatting: labs/cmd/simshell/registry.go:117 - displayStoredValue()
+   Decodes version records and latest pointers instead of showing only hashes.
+   Prints domain/package, version, blob/record references and predecessor.
+   Marks malformed entries. Diagnostic decoding alone is not ownership proof.
+
+OWNERSHIP, KEYS AND STARTUP FLAGS
+
+keygen FILE
+  labs/cmd/simshell/registry.go:348 - keygenCmd()
+  Generates an Ed25519 key, writes the private key locally and prints the public
+  DNS TXT value. Refuses to overwrite an existing file.
+
+--publisher-key FILE / --owners-file FILE
+  Registered in labs/cmd/simshell/main.go:63 - root()
+  Owners loading: labs/cmd/simshell/registry.go:22 - loadOwners()
+  An owners JSON file maps domains to public keys and creates fake DNS records.
+  With no owners file, the verifier uses real DNS TXT records.
+  TXT format: d7024e-ed25519=PUBLIC_KEY_HEX
+  Record verification: labs/metadata/records.go:159 - VerifyVersionRecord()
+                       labs/metadata/records.go:214 - VerifyLatestPointer()
+  Owner checks: labs/kademlia/ownership.go:11 - VerifyOwnedVersionRecord()
+                labs/kademlia/ownership.go:49 - VerifyOwnedLatestPointer()
+
+--transport simulated / --nodes N
+  labs/cmd/simshell/main.go:173 - configureSimulated()
+  Creates N nodes in one simulated network. The interactive CLI controls one.
+
+--transport udp / --addr / --listen-addr / --bootstrap-addr
+  labs/cmd/simshell/main.go:216 - configureUDP()
+  Binds a real UDP node and joins the bootstrap when configured.
+
+--alpha / --k / --b / --replication-period / --refresh-period
+  Registered in labs/cmd/simshell/main.go:63 - root()
+  Applied during configureSimulated() and configureUDP().
+  Control lookup parallelism, replica/bucket capacity, routing-tree parameter
+  and maintenance intervals.
+
+EXTRA DEMONSTRATION COMMANDS
+
+show nodes
+  Registration: labs/cmd/simshell/main.go:351
+  Handler: labs/cmd/simshell/main.go:521 - showTo(), case "nodes"
+  Lists the simulated session's nodes. In UDP mode it lists the local node;
+  it is not a census of all remote Docker servers.
+
+serve
+  labs/cmd/simshell/main.go:101
+  Runs the configured node as a persistent server without an interactive prompt.
+
+test
+  labs/cmd/simshell/main.go:361 - testCmd()
+  labs/cmd/simshell/main.go:379 - runCLIDemoTest()
+  Runs the built-in simulated Part 1 demonstration.
+
+DEMONSTRATION GUIDES
+  labs/cmd/tests/CLI-SIMULATED-GUIDE.md
+  labs/cmd/tests/CLI-UDP-GUIDE.md
+  labs/cmd/tests/CLI-DOCKER-GUIDE.md

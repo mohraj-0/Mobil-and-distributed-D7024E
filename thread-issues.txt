@@ -1,0 +1,19 @@
+﻿THREAD ISSUES AND PREVENTION
+Paths are repository-relative.
+
+HIGH RISK
+- labs/kademlia/kademlia.go:275: one goroutine per incoming RPC can exhaust resources. Alpha limits lookup batches only. Add bounded workers.
+- kademlia.go:46: public DataStore/configuration fields can bypass internal locks. Use DataSnapshot; configure before starting goroutines.
+- tutorials/4-mocking-networks/mock_network.go:110 and tutorials/5-implementing-and-testing-a-distributed-algorihm/mock_network.go:110: Close writes recvCh outside the connection mutex; Recv reads under it. Use the same lock.
+
+MEDIUM RISK
+- labs/kademlia/maintenance.go:122-175: concurrent restart can overlap the previous worker; stopping waits for ongoing replication/lookups. Serialize lifecycle transitions and add cancellation.
+- labs/kademlia/kademlia.go:944: Store requires callers to avoid mutating input bytes during execution.
+
+LOWER RISK AND EXISTING SAFEGUARDS
+- labs/kademlia/latest.go:70-136: package locks and current-head rechecks prevent stale updates overwriting newer versions.
+- labs/kademlia/routingtable.go:343-377: mutexes protect buckets; timestamp checks reject stale eviction decisions.
+- labs/kademlia/network.go:469-543: coordinated send/close locks prevent closed-channel sends.
+- RPC maps use mutexes, buffered nonblocking replies, timeouts, and deferred cleanup. Datastore methods lock and copy bytes.
+
+Validation: labs go test -race -p 1 ./... passed (some cached). Tutorials were inspected only. Tests cannot prove every schedule safe.

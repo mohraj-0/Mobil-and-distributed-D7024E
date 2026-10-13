@@ -4,11 +4,33 @@ Run PowerShell in `labs`. Uses fake DNS ownership. Probe logs are saved separate
 
 `d` runs a fresh real UDP client for each command; the independent servers keep the data.
 
+## What changes in the recipe
+
+`cli-check/release.txt` is the actual text package. Each version keeps previous improvements and makes the following visible change:
+
+| Version | Recipe change |
+|---|---|
+| 1 | Initial blueberry pie recipe. |
+| 2 | Sugar decreases from 150 g to 120 g. |
+| 3 | Adds 1 tablespoon lemon juice. |
+| 4 | Adds 1 teaspoon lemon zest. |
+| 5 | Cornstarch increases from 2 to 3 tablespoons. |
+| 6 | Adds 30 minutes of dough chilling. |
+| 7 | Oven temperature increases from 180 C to 190 C. |
+| 8 | Baking time increases from 40 to 45 minutes. |
+| 9 | Adds an egg glaze. |
+| 10 | Specifies 2 hours of cooling before slicing. |
+
+`Update-Release N` changes the actual file and prints the full saved recipe, including `Version: N` and `Change:`. Publishing uploads those saved bytes. Downloading an old version should show its old ingredients and instructions, even after the source file has been updated.
+
 ## Prepare once
 
 ```powershell
 # Create the test folder if missing.
 New-Item -ItemType Directory -Force cli-check
+
+# Allow local scripts in this PowerShell session only.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 # Build the current CLI once.
 go build -o cli-check/kadlab.exe ./cmd/simshell
@@ -17,8 +39,9 @@ go build -o cli-check/kadlab.exe ./cmd/simshell
 # This action does not start Docker.
 .\docker-lab.ps1 -Action Prepare -PublisherKey cli-check/owner.key -OwnersFile cli-check/owners.json
 
-# Create one package file; all ten versions will update this SAME file.
-[IO.File]::WriteAllText("$PWD/cli-check/release.txt", 'release 1')
+# Load the recipe helper and create version 1 of the SAME recipe file.
+. ./cmd/tests/recipe-demo.ps1
+Update-Release 1
 
 # Create binary input for the Part 1 test.
 [IO.File]::WriteAllBytes("$PWD/cli-check/binary.bin", [byte[]](0,1,127,128,255))
@@ -67,14 +90,21 @@ $binaryCopy = '/tmp/cli-check/binary-copy.bin'
 $pingAddress = 'kademlia-bootstrap:8000'
 
 # Rewrite the SAME file and replace its container copy.
+. ./cmd/tests/recipe-demo.ps1
 function Update-Release([int]$version) {
-    [IO.File]::WriteAllText("$PWD/cli-check/release.txt", "release $version")
+    Save-Recipe $version
     docker cp cli-check/release.txt "${bootstrap}:/tmp/cli-check/release.txt"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not copy the updated recipe into Docker' }
+    Write-Host 'Saved container recipe:'
+    docker exec $bootstrap cat /tmp/cli-check/release.txt
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the updated container recipe' }
 }
 
 # Read a downloaded file from the container.
-function Read-DemoFile([string]$path) { docker exec $bootstrap cat $path }
+function Read-DemoFile([string]$path) { (docker exec $bootstrap cat $path) -join "`n" }
 ```
+
+Each `Update-Release N` prints the full updated host recipe and its hash, copies it into Docker, then prints the container recipe too. Run the helper setup again to replace the old function.
 
 ## Part 1
 
@@ -93,17 +123,16 @@ d put $release
 # Compute the expected key from the exact uploaded bytes.
 $key = (Get-FileHash cli-check/release.txt -Algorithm SHA256).Hash.ToLowerInvariant()
 
-# Print the value. Expect release 1 and the source server.
+# Print the value. Expect the full version 1 blueberry pie recipe and the source server.
 d get $key
 
 # Save the retrieved value. Expect destination filename and source server.
 d get $key $download
 
 # Check exact contents. Expect True.
-(Read-DemoFile $download) -ceq 'release 1'
+(Read-DemoFile $download) -ceq (Get-RecipeText 1)
 
-# Print the fresh client's local store; it may be empty.
-d show ds
+# Demonstrate show ds in the persistent session below; a fresh client starts empty.
 
 # Upload arbitrary binary bytes and calculate their expected key.
 d put $binary
@@ -129,6 +158,8 @@ d get ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ```
 
 Verify the binary download:
+
+Run these in **PowerShell from `labs`**, after `get` reports that the file was saved. First copy the downloaded container file to the host. Then `Get-FileHash` reads each host file and calculates a SHA-256 fingerprint; `.Hash` selects that fingerprint, and `-eq` compares the two. The comparison does not modify either file. `True` verifies that all binary bytes match. `False` means different bytes only if both files exist and were read successfully; a missing-file error means the check did not complete. This tests that `put` and `get` preserve binary data without displaying it as text. Run each command once on its own line.
 
 ```powershell
 # Copy the downloaded binary back to the host.
@@ -215,23 +246,28 @@ d show example.com:demo
 # Install latest. Expect installed version 10.
 d install example.com:demo:latest --output $download
 
+# Print the downloaded version 10 recipe so its changes are visible.
+Read-DemoFile $download
+
 # Latest must contain version 10's bytes. Expect True.
-(Read-DemoFile $download) -ceq 'release 10'
+(Read-DemoFile $download) -ceq (Get-RecipeText 10)
 
 # Test EVERY historical version, not just latest.
 # Expect version=N matches=True for each N from 1 through 10.
 foreach ($version in 1..10) {
     d install "example.com:demo:$version" --output $download
-    $matches = (Read-DemoFile $download) -ceq "release $version"
+    # Display this historical recipe before checking it.
+    Read-DemoFile $download
+    $matches = (Read-DemoFile $download) -ceq (Get-RecipeText $version)
     "version=$version matches=$matches"
     if (-not $matches) { throw "Incorrect bytes for version $version" }
 }
 
-# Test install's default filename. Expect demo-1.pkg containing release 1.
+# Test install's default filename. Expect demo-1.pkg containing the version 1 recipe.
 d install example.com:demo:1
 ```
 
-Check `docker exec $bootstrap cat /app/demo-1.pkg`: it must print `release 1`.
+Check `docker exec $bootstrap cat /app/demo-1.pkg`: it must print the full version 1 blueberry pie recipe.
 
 ## Part 2: invalid updates and --force
 
@@ -279,7 +315,7 @@ d show example.com:demo
 
 # Check latest remains version 10 with unchanged bytes. Expect True.
 d install example.com:demo:latest --output $download
-(Read-DemoFile $download) -ceq 'release 10'
+(Read-DemoFile $download) -ceq (Get-RecipeText 10)
 ```
 
 ### Wrong owner
@@ -302,20 +338,23 @@ d show example.com:intruder
 
 ## Decoded store and exit
 
-Open a persistent client so `show ds` can display metadata fetched by the preceding command.
+Open a persistent client with `k=51`: 50 servers plus this client. Run `put` and `show ds` in this same session so the local store visibly contains the file. Ensure all 50 servers are healthy. The earlier commands use the default k.
 
 
 ```powershell
 # Open the interactive UDP client with terminal input attached.
-docker exec -it $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/client.log'
+docker exec -it $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --k 51 --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/client.log'
 ```
 
 At `simnet>`, run each command separately:
 
 | Command | Expected result |
 |---|---|
+| `put /tmp/cli-check/release.txt` | Attempts storage across all 51 reachable nodes, including this client. Prints the full key. |
+| `show ds` | Must show that key shortened and the actual byte count for the current version 10 recipe file. |
+| `publish example.com:visible:1 /tmp/cli-check/release.txt` | Creates a separate demonstration package with locally stored metadata. Use a fresh name on repeat runs. |
+| `show ds` | Must show the blob, a decoded `version-record example.com:visible version=1`, and a `latest-pointer example.com:visible version=1`. |
 | `show example.com:demo` | Retrieves/verifies the ten-version history. |
-| `show ds` | Decodes locally cached version records/latest pointers with package/version fields and short hashes. |
 | `show rt` | Displays populated routing buckets. |
 | `exit` | Ends the client and returns to PowerShell. |
 

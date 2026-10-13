@@ -1,122 +1,278 @@
-# Part 1 and Part 2: simulated network
+# Part 1 and Part 2: simulated blueberry pie demonstration
 
-Run PowerShell in `labs`. This uses 50 in-process simulated nodes with fake DNS ownership. Probe logs are saved separately; no replication experiments are included.
+This guide uses **10 simulated nodes in one process**, fake DNS ownership and one text recipe updated through ten versions. Run both PowerShell terminals from `labs`. No UDP or Docker engine is needed. Probe logs are saved separately.
 
-## Prepare once
+## 1. Prepare in PowerShell
 
 ```powershell
-# Create the test folder if missing.
+# Create the folder for keys, the recipe and downloads.
 New-Item -ItemType Directory -Force cli-check
 
-# Build the current CLI once.
+# Allow the local helper scripts in this PowerShell session only.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+# Build the current CLI.
 go build -o cli-check/kadlab.exe ./cmd/simshell
 
-# Create/reuse a publisher key and fake DNS configuration for example.com.
-# This action does not start Docker.
+# Create/reuse owner.key and the fake DNS public-key configuration.
+# Prepare only generates files; it does not start Docker.
 .\docker-lab.ps1 -Action Prepare -PublisherKey cli-check/owner.key -OwnersFile cli-check/owners.json
 
-# Create one package file; all ten versions will update this SAME file.
-[IO.File]::WriteAllText("$PWD/cli-check/release.txt", 'release 1')
+# Load the blueberry pie recipe functions; replace any old Update-Release function.
+. ./cmd/tests/recipe-demo.ps1
 
-# Create binary input for the Part 1 test.
+# Create the actual version 1 recipe and print its saved text.
+Update-Release 1
+Get-Content cli-check/release.txt
+
+# Create binary input: Part 1 must preserve arbitrary bytes, not only text.
 [IO.File]::WriteAllBytes("$PWD/cli-check/binary.bin", [byte[]](0,1,127,128,255))
 
-# Create a signer that does not own example.com. Skip if already created.
-.\cli-check\kadlab.exe keygen cli-check/other.key
+# Create a non-owner signing key only if it does not already exist.
+if (-not (Test-Path cli-check/other.key)) { .\cli-check\kadlab.exe keygen cli-check/other.key }
 ```
 
-Use a fresh package name instead of `demo` if repeating against a network with an existing history.
+The recipe must start with `BLUEBERRY PIE`, `Version: 1`, and `Change: Initial blueberry pie recipe.`, followed by ingredients and instructions. If it only says `release 1`, reload the helper and run `Update-Release 1` again.
 
-## Start the simulated network
+## 2. Terminal 1: start the simulated CLI
 
-Use two PowerShell terminals in `labs`. The simulated network exists only while terminal 1's CLI stays open. Keep this interactive session open: one-shot commands would create a new empty network each time.
-
-Terminal 1:
+Run this in PowerShell:
 
 ```powershell
-# Start 50 simulated nodes in one process; save probe logs to a file.
-.\cli-check\kadlab.exe --transport simulated --nodes 50 --owners-file cli-check/owners.json --publisher-key cli-check/owner.key 2>> cli-check/simulated.log
+# Start 10 nodes. k=10 includes the current node in the storage set.
+.\cli-check\kadlab.exe --transport simulated --nodes 10 --k 10 --owners-file cli-check/owners.json --publisher-key cli-check/owner.key 2>> cli-check/simulated.log
 ```
 
-Terminal 2:
+Keep this session open throughout the demonstration. `simnet>` is the CLI prompt; run only CLI commands there. Another simnet process would create a separate network. `exit` destroys this in-memory network.
+
+## 3. Terminal 2: load the recipe helper
+
+In another **PowerShell terminal in `labs`**, paste this block:
 
 ```powershell
-# Update the SAME package file while the simulated CLI stays open.
-function Update-Release([int]$version) { [IO.File]::WriteAllText("$PWD/cli-check/release.txt", "release $version") }
-
-# Set its initial contents before running the Part 1 commands.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+. ./cmd/tests/recipe-demo.ps1
 Update-Release 1
-
-# Print the expected SHA-256 key for the text file.
-Get-FileHash cli-check/release.txt -Algorithm SHA256
+Get-Content cli-check/release.txt
 ```
 
-### Simulated Part 1
+The full recipe must be visible here. Use terminal 2 to update files and inspect downloads; use terminal 1 to publish and install. Defining/loading functions alone does not update a file.
 
-Run these commands individually at terminal 1's `simnet>` prompt. Replace `KEY` with the hash printed by the preceding `put`. The prompt does not expand PowerShell variables and does not accept comments.
+## 4. Part 1: CLI commands in terminal 1
+
+Replace `KEY` with the full hash printed by the relevant `put`. Do not type PowerShell commands or comments at `simnet>`.
 
 | CLI command | Explanation / expected result |
 |---|---|
-| `show nodes` | Lists all 50 simulated nodes. |
-| `ping 127.0.0.1:8049` | Pings another simulated node; prints pong and round-trip time. |
-| `show rt` | Shows populated routing buckets and shortened node IDs. |
-| `put cli-check/release.txt` | Uploads `release 1`; printed key must match the PowerShell SHA-256 hash. |
-| `get KEY` | Prints `release 1` and the source node. |
-| `get KEY cli-check/sim-download.txt` | Saves the downloaded bytes. |
-| `show ds` | Shows the current node's local stored values; it can be empty if other nodes hold the replicas. |
-| `put cli-check/binary.bin` | Stores the binary input; copy its new key. |
-| `get KEY cli-check/sim-binary.bin` | Downloads that binary input using its key. |
-| `ping bad-address` | Must reject invalid address syntax. |
-| `ping 127.0.0.1:7999` | Must fail because this peer does not exist. |
-| `put missing-file.txt` | Must report a missing file. |
-| `get bad-key` | Must reject the malformed hash. |
-| `get ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff` | Must report not found for the absent key. |
+| `show nodes` | Lists the 10 simulated nodes. |
+| `ping 127.0.0.1:8009` | Pings another simulated node; prints pong and round-trip time. |
+| `show rt` | Shows populated routing buckets and shortened IDs. |
+| `put cli-check/release.txt` | Uploads the version 1 recipe and prints its SHA-256 key. |
+| `get KEY` | Prints the full recipe and the source node. |
+| `get KEY cli-check/sim-download.txt` | Saves the downloaded recipe; must print a saved-file message. |
+| `show ds` | Shows the uploaded key shortened and its byte count. k=10 includes this local node. |
+| `put cli-check/binary.bin` | Stores binary input; copy the new key. |
+| `get KEY cli-check/sim-binary.bin` | Downloads that binary value using its key. |
+| `ping bad-address` | Rejects malformed address syntax. |
+| `ping 127.0.0.1:7999` | Reports an unreachable peer. |
+| `put missing-file.txt` | Reports a missing file. |
+| `get bad-key` | Rejects an invalid hash. |
+| `get ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff` | Reports an absent value. |
 
-In terminal 2, check the downloaded files:
+Terminal 2, PowerShell:
 
 ```powershell
-# Expect True: text bytes were preserved.
+# Show the downloaded recipe.
+Get-Content cli-check/sim-download.txt
+
+# Print the expected key; compare it with put's output, ignoring hex letter case.
+Get-FileHash cli-check/release.txt -Algorithm SHA256
+
+# Compare original and downloaded text. Expect True before updating the recipe.
 (Get-FileHash cli-check/release.txt).Hash -eq (Get-FileHash cli-check/sim-download.txt).Hash
 
-# Expect True: binary bytes were preserved.
+# Compare original and downloaded binary bytes. Expect True.
 (Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/sim-binary.bin).Hash
 
-# Prepare the supported and oversized file-size boundary inputs.
+# Create supported/unsupported file-size boundary inputs.
 [IO.File]::WriteAllBytes("$PWD/cli-check/limit.bin", [byte[]]::new(32768))
 [IO.File]::WriteAllBytes("$PWD/cli-check/oversize.bin", [byte[]]::new(32769))
 ```
 
-At terminal 1's CLI, `put cli-check/limit.bin` must succeed; `put cli-check/oversize.bin` must report a size error.
+`Get-FileHash` reads a file and calculates its SHA-256 fingerprint; `.Hash` selects it; `-eq` compares fingerprints. These commands do not change files. `True` means matching bytes. A missing-file error means the comparison could not complete. Run each command once on its own line.
 
-### Simulated Part 2: ten updates of one file
+At terminal 1's CLI: `put cli-check/limit.bin` must succeed, and `put cli-check/oversize.bin` must report a size error.
 
-For **each row**, run the terminal 2 command first, then the terminal 1 CLI command. Wait for publication to finish before moving to the next row. This ensures each published version has different bytes.
+## 5. Part 2: ten visibly different recipe versions
 
-| Terminal 2: PowerShell | Terminal 1: CLI | What is tested |
-|---|---|---|
-| `Update-Release 1` | `publish example.com:demo:1 cli-check/release.txt` | First version; automatic genesis predecessor. |
-| `Update-Release 2` | `publish example.com:demo:2 cli-check/release.txt` | Automatic predecessor version 1. |
-| `Update-Release 3` | `publish --prev=2 example.com:demo:3 cli-check/release.txt` | Explicit valid predecessor version 2. |
-| `Update-Release 4` | `publish example.com:demo:4 cli-check/release.txt` | Extends version 3. |
-| `Update-Release 5` | `publish example.com:demo:5 cli-check/release.txt` | Extends version 4. |
-| `Update-Release 6` | `publish example.com:demo:6 cli-check/release.txt` | Extends version 5. |
-| `Update-Release 7` | `publish example.com:demo:7 cli-check/release.txt` | Extends version 6. |
-| `Update-Release 8` | `publish example.com:demo:8 cli-check/release.txt` | Extends version 7. |
-| `Update-Release 9` | `publish example.com:demo:9 cli-check/release.txt` | Extends version 8. |
-| `Update-Release 10` | `publish --prev=9 example.com:demo:10 cli-check/release.txt` | Explicitly extends version 9. |
+For each version, run its **terminal 2 PowerShell block first**, then its **terminal 1 CLI command**. Wait for publication to finish before changing the file again. Use a fresh package name instead of `demo` if this network already contains a published demo.
 
-Each publication must show replica acceptance and `published`. Then run these commands at the CLI:
+### Version 1: Initial recipe with 150 g sugar, 180 C oven and 40 minutes baking.
 
-| CLI command | Explanation / expected result |
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 1
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:1 cli-check/release.txt
+```
+
+### Version 2: Reduce sugar from 150 g to 120 g.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 2
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:2 cli-check/release.txt
+```
+
+### Version 3: Add 1 tablespoon lemon juice.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 3
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish --prev=2 example.com:demo:3 cli-check/release.txt
+```
+
+### Version 4: Add 1 teaspoon lemon zest.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 4
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:4 cli-check/release.txt
+```
+
+### Version 5: Increase cornstarch from 2 to 3 tablespoons.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 5
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:5 cli-check/release.txt
+```
+
+### Version 6: Chill the dough for 30 minutes.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 6
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:6 cli-check/release.txt
+```
+
+### Version 7: Increase oven temperature from 180 C to 190 C.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 7
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:7 cli-check/release.txt
+```
+
+### Version 8: Increase baking time from 40 to 45 minutes.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 8
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:8 cli-check/release.txt
+```
+
+### Version 9: Brush the top crust with beaten egg.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 9
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish example.com:demo:9 cli-check/release.txt
+```
+
+### Version 10: Cool for 2 hours before slicing.
+
+Terminal 2 ? PowerShell: save and display the actual recipe.
+
+```powershell
+Update-Release 10
+Get-Content cli-check/release.txt
+```
+
+Terminal 1 ? simnet>: publish those bytes. Expect replica acceptance and published.
+
+```text
+publish --prev=9 example.com:demo:10 cli-check/release.txt
+```
+
+Versions 3 and 10 explicitly select the preceding version with `--prev`; other updates select it automatically. The first publication uses genesis. Each version keeps earlier improvements.
+
+## 6. Show history and install all ten recipes
+
+Terminal 1 ? CLI:
+
+| Command | Explanation / expected result |
 |---|---|
 | `show dns example.com` | Shows the trusted owner's public key. |
 | `show dns missing.example` | Reports unknown ownership. |
-| `show example.com:demo` | Shows exactly ten verified records: `10 -> ... -> 1 -> genesis`. |
-| `show ds` | Decodes locally stored version records/latest pointers where present. |
-| `install example.com:demo:latest --output cli-check/sim-latest.txt` | Downloads version 10. |
-| `install example.com:demo:1` | Tests the default filename `demo-1.pkg`, containing `release 1`. |
+| `show example.com:demo` | Shows exactly ten verified versions: 10 back to 1 and genesis. |
+| `show ds` | Shows recipe blobs, decoded version records and latest pointer at version 10 in this node's store. |
+| `install example.com:demo:latest --output cli-check/sim-latest.txt` | Downloads the newest recipe, version 10. |
+| `install example.com:demo:1` | Downloads the original recipe to the default file demo-1.pkg. |
 
-Paste this block at the CLI to download **all ten historical versions**:
+Paste these CLI commands to download every historical version separately:
 
 ```text
 install example.com:demo:1 --output cli-check/sim-1.txt
@@ -131,33 +287,38 @@ install example.com:demo:9 --output cli-check/sim-9.txt
 install example.com:demo:10 --output cli-check/sim-10.txt
 ```
 
-In terminal 2:
+Terminal 2 ? PowerShell:
 
 ```powershell
-# Latest must contain release 10. Expect True.
-[IO.File]::ReadAllText("$PWD/cli-check/sim-latest.txt") -ceq 'release 10'
+# Display the original and newest recipe: the ingredients and method differ.
+Get-Content cli-check/sim-1.txt
+Get-Content cli-check/sim-10.txt
 
-# Default install must contain release 1. Expect True.
-[IO.File]::ReadAllText("$PWD/demo-1.pkg") -ceq 'release 1'
+# Check latest and default install against their expected full recipe text.
+# Both comparisons must print True.
+[IO.File]::ReadAllText("$PWD/cli-check/sim-latest.txt") -ceq (Get-RecipeText 10)
+[IO.File]::ReadAllText("$PWD/demo-1.pkg") -ceq (Get-RecipeText 1)
 
-# Check every historical download against its original contents.
-# Expect version=N matches=True for all ten versions.
+# Check all ten downloaded versions against their original recipe text.
+# Expect version=N matches=True for each N=1 through 10.
 foreach ($version in 1..10) {
-    $matches = [IO.File]::ReadAllText("$PWD/cli-check/sim-$version.txt") -ceq "release $version"
+    $matches = [IO.File]::ReadAllText("$PWD/cli-check/sim-$version.txt") -ceq (Get-RecipeText $version)
     "version=$version matches=$matches"
-    if (-not $matches) { throw "Incorrect bytes for version $version" }
+    if (-not $matches) { throw "Incorrect recipe for version $version" }
 }
 ```
 
-### Simulated rejection tests
+`Get-RecipeText N` generates the expected recipe text without changing any files. Old installed versions must retain their original recipe even though release.txt now contains version 10.
 
-Run at terminal 1's CLI. Latest must stay **10**.
+## 7. Invalid updates: latest must remain 10
 
-| CLI command | Explanation / expected result |
+Terminal 1 ? CLI:
+
+| Command | Explanation / expected result |
 |---|---|
 | `publish example.com:demo:5 cli-check/release.txt` | Sender rejects rollback. |
 | `publish example.com:demo:10 cli-check/release.txt` | Sender rejects duplicate version. |
-| `publish --prev=3 example.com:demo:11 cli-check/release.txt` | Sender rejects a fork from an old version. |
+| `publish --prev=3 example.com:demo:11 cli-check/release.txt` | Sender rejects a fork from an old predecessor. |
 | `publish --force example.com:demo:5 cli-check/release.txt` | Receivers reject forced rollback. |
 | `publish --force --prev=3 example.com:demo:11 cli-check/release.txt` | Receivers reject forced fork. |
 | `publish --force --prev=0 example.com:demo:11 cli-check/release.txt` | Receivers reject competing genesis. |
@@ -165,36 +326,48 @@ Run at terminal 1's CLI. Latest must stay **10**.
 | `publish --prev=3 example.com:demo:11 cli-check/release.txt` | Sender rejects again: force must not persist. |
 | `publish example.com:demo:0 cli-check/release.txt` | Rejects zero version. |
 | `publish --prev=99 example.com:demo:11 cli-check/release.txt` | Rejects unknown predecessor. |
-| `install example.com:demo:99` | Rejects missing version. |
+| `install example.com:demo:99` | Reports missing version. |
 | `install example.com:missing:latest` | Reports missing package. |
-| `show example.com:demo` | Still shows ten accepted versions with latest 10. |
-| `install example.com:demo:latest --output cli-check/sim-latest.txt` | Latest still downloads version 10. |
-| `exit` | Ends the client and all 50 simulated nodes. |
+| `show example.com:demo` | Still shows exactly ten accepted versions with latest 10. |
+| `install example.com:demo:latest --output cli-check/sim-latest.txt` | Still installs version 10. |
 
-Repeat the latest-content PowerShell check above after the rejected updates; it must still print `True`.
-
-### Simulated wrong-owner test
-
-After exiting the original session, start a fresh simulated network with the **other** signer but the unchanged trusted owner:
+Terminal 2 ? PowerShell:
 
 ```powershell
-# Receivers still trust owner.key's public key; the publisher uses other.key.
-.\cli-check\kadlab.exe --transport simulated --nodes 3 --owners-file cli-check/owners.json --publisher-key cli-check/other.key 2>> cli-check/simulated.log
+# Show that the installed latest recipe still contains version 10's improvements.
+Get-Content cli-check/sim-latest.txt
+
+# Must still print True after all rejected updates.
+[IO.File]::ReadAllText("$PWD/cli-check/sim-latest.txt") -ceq (Get-RecipeText 10)
 ```
 
-| CLI command | Explanation / expected result |
+`--force` bypasses publisher preflight, not receiver validation. Rejected attempts may leave blobs/records stored, but must not change accepted history. There is no `put --force` flag.
+
+Terminal 1 ? CLI: `exit` ends the client and all 10 simulated nodes.
+
+## 8. Wrong-owner demonstration
+
+After exit, start a fresh network from terminal 1's PowerShell. Receivers still trust owner.key's public key; the publisher uses other.key.
+
+```powershell
+.\cli-check\kadlab.exe --transport simulated --nodes 3 --k 3 --owners-file cli-check/owners.json --publisher-key cli-check/other.key 2>> cli-check/simulated.log
+```
+
+At simnet>:
+
+| Command | Explanation / expected result |
 |---|---|
 | `publish example.com:intruder:1 cli-check/release.txt` | Sender rejects the non-owner key. |
 | `publish --force example.com:intruder:1 cli-check/release.txt` | Receivers reject the non-owner signature. |
 | `show example.com:intruder` | No accepted intruder package exists. |
 | `exit` | Ends the test network. |
 
-## Conditions the CLI cannot directly create
+## 9. Conditions the ordinary CLI cannot create
 
-These targeted tests cover malicious data and missed updates; no replication tests are included.
+Run in PowerShell from labs. Require PASS.
 
 ```powershell
-# Reject wrong-hash stores and corrupted downloaded values.
+# Reject a wrong-hash store and corrupted downloaded bytes.
 go test ./kademlia -run 'TestStoreLocalAndHandleStoreRPC|TestLookupDataRejectsCorruptedRemoteValue' -count=1 -v
 
 # Catch up after missing several publications.
@@ -204,21 +377,4 @@ go test ./cmd/simshell -run '^TestCLIInstallCatchesUpSeveralMissedPublications$'
 go test ./metadata ./registry -run 'TestHistoryCycle' -count=1 -v
 ```
 
-Require PASS. This demonstration guide does not replace the complete engineering suite or report.
-
--------------------------------------------------------
-For a clear simulated demonstration:
-
-# Start 3 simulated nodes and store each file on all 3.
-.\cli-check\kadlab.exe --transport simulated --nodes 3 --k 3 2>> cli-check/simulated.log
-
-At simnet>:
-
-put cli-check/release.txt
-show ds
-
-show ds should show the uploaded file’s shortened hash and byte count. It displays only the current node’s store, so this proves that node holds the file.
-
-For your 50-node simulated setup, use --nodes 50 --k 50. For Docker’s 50 servers plus the demonstration client, launch the client with --k 51, then run put and show ds in the same interactive session.
-
-There is no put --force option. Increasing k requests more copies, but does not guarantee every node accepted them if some are unreachable. A successful put alone proves at least one copy was stored.
+This is a demonstration guide, not the complete engineering test suite or report. No replication experiments are included. `show ds` displays only the current node's store; k=10 includes that node in the healthy ten-node simulation.
