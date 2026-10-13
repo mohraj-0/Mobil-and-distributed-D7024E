@@ -1,451 +1,337 @@
-# Part 1 and Part 2: UDP with 50 Docker servers
+﻿# Part 1 and Part 2: interactive CLI with 50 Docker UDP servers
 
-Run PowerShell in `labs`. Uses fake DNS ownership. Probe logs are saved separately; replication experiments are omitted.
+Use two PowerShell terminals in `labs`. Terminal 1 writes and publishes; terminal 2 retrieves and installs. Both enter `simnet>`, but these sessions use **real UDP with 50 Docker servers**. Type CLI commands directly, without `d`.
 
-`d` runs a fresh real UDP client for each command; the independent servers keep the data. Use two PowerShell terminals: terminal 1 writes and publishes; terminal 2 retrieves and verifies through the same 50-server network.
+Only type CLI commands at `simnet>`. Docker commands, recipe helpers, and file checks belong in PowerShell. Type `exit` to return to PowerShell; the 50 servers continue running and keep the data. Do not redeploy the stack between writing and reading.
 
-## What changes in the recipe
+## 1. Prepare in terminal 1: PowerShell
 
-`cli-check/release.txt` is the actual text package. Each version keeps previous improvements and makes the following visible change:
-
-| Version | Recipe change |
-|---|---|
-| 1 | Initial blueberry pie recipe. |
-| 2 | Sugar decreases from 150 g to 120 g. |
-| 3 | Adds 1 tablespoon lemon juice. |
-| 4 | Adds 1 teaspoon lemon zest. |
-| 5 | Cornstarch increases from 2 to 3 tablespoons. |
-| 6 | Adds 30 minutes of dough chilling. |
-| 7 | Oven temperature increases from 180 C to 190 C. |
-| 8 | Baking time increases from 40 to 45 minutes. |
-| 9 | Adds an egg glaze. |
-| 10 | Specifies 2 hours of cooling before slicing. |
-
-`Update-Release N` changes the actual file and prints the full saved recipe, including `Version: N` and `Change:`. Publishing uploads those saved bytes. Downloading an old version should show its old ingredients and instructions, even after the source file has been updated.
-
-## Prepare once
+Start Docker Desktop's Linux engine. Use a fresh package name instead of `demo` when repeating against an existing history. Starting the stack may restart servers and lose their in-memory values.
 
 ```powershell
-# Create the test folder if missing.
 New-Item -ItemType Directory -Force cli-check
-
-# Allow local scripts in this PowerShell session only.
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-
-# Build the current CLI once.
 go build -o cli-check/kadlab.exe ./cmd/simshell
-
-# Create/reuse a publisher key and fake DNS configuration for example.com.
-# This action does not start Docker.
 .\docker-lab.ps1 -Action Prepare -PublisherKey cli-check/owner.key -OwnersFile cli-check/owners.json
-
-# Load the recipe helper and create version 1 of the SAME recipe file.
+if (-not (Test-Path cli-check/other.key)) { .\cli-check\kadlab.exe keygen cli-check/other.key }
 . ./cmd/tests/recipe-demo.ps1
 Update-Release 1
-
-# Create binary input for the Part 1 test.
 [IO.File]::WriteAllBytes("$PWD/cli-check/binary.bin", [byte[]](0,1,127,128,255))
-
-# Create a signer that does not own example.com. Skip if already created.
-.\cli-check\kadlab.exe keygen cli-check/other.key
-```
-
-Use a fresh package name instead of `demo` if repeating against a network with an existing history.
-
-## Start the Docker network
-
-Use Docker Desktop with its Linux engine. Start rebuilds/redeploys the `kadlab` stack and may restart existing nodes, losing their in-memory values.
-
-```powershell
-# Build and start one bootstrap plus 49 UDP servers.
+[IO.File]::WriteAllBytes("$PWD/cli-check/limit.bin", [byte[]]::new(32768))
+[IO.File]::WriteAllBytes("$PWD/cli-check/oversize.bin", [byte[]]::new(32769))
 .\docker-lab.ps1 -Action Start -PublisherKey cli-check/owner.key -OwnersFile cli-check/owners.json
-
-# Wait for bootstrap 1/1 and other servers 49/49.
 .\docker-lab.ps1 -Action Status
-
-# Find the local bootstrap container.
-$bootstrap = docker ps --filter 'label=com.docker.swarm.service.name=kadlab_kademlia-bootstrap' --format '{{.ID}}'
-
-# Prepare the container files.
-docker exec $bootstrap mkdir -p /tmp/cli-check
-docker cp cli-check/release.txt "${bootstrap}:/tmp/cli-check/release.txt"
-docker cp cli-check/binary.bin "${bootstrap}:/tmp/cli-check/binary.bin"
-
-# Supply the signing key to the demonstration client only.
-docker cp cli-check/owner.key "${bootstrap}:/tmp/cli-check/owner.key"
-docker exec $bootstrap chmod 600 /tmp/cli-check/owner.key
-
-# Each call launches a fresh UDP client on port 9000.
-# Save probe messages in the container, keeping command output visible.
-function d {
-    docker exec -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell "$@" 2>>/tmp/cli-check/client.log' demo --publisher-key /tmp/cli-check/owner.key @args
-    if ($LASTEXITCODE -ne 0) { docker exec $bootstrap tail -n 1 /tmp/cli-check/client.log }
-}
-
-# Set container paths and the successful ping target.
-$release = '/tmp/cli-check/release.txt'
-$download = '/tmp/cli-check/download.txt'
-$binary = '/tmp/cli-check/binary.bin'
-$binaryCopy = '/tmp/cli-check/binary-copy.bin'
-$pingAddress = 'kademlia-bootstrap:8000'
-
-# Rewrite the SAME file and replace its container copy.
-. ./cmd/tests/recipe-demo.ps1
-function Update-Release([int]$version) {
-    Save-Recipe $version
-    docker cp cli-check/release.txt "${bootstrap}:/tmp/cli-check/release.txt"
-    if ($LASTEXITCODE -ne 0) { throw 'Could not copy the updated recipe into Docker' }
-    Write-Host 'Saved container recipe:'
-    docker exec $bootstrap cat /tmp/cli-check/release.txt
-    if ($LASTEXITCODE -ne 0) { throw 'Could not read the updated container recipe' }
-}
-
-# Read a downloaded file from the container.
-function Read-DemoFile([string]$path) { (docker exec $bootstrap cat $path) -join "`n" }
 ```
 
-Each `Update-Release N` prints the full updated host recipe and its hash, copies it into Docker, then prints the container recipe too. Run the helper setup again to replace the old function.
-
-## Terminal 2: independent reader
-
-Run the preparation and network startup above in terminal 1 only. In a second PowerShell terminal in `labs`, run:
+Wait for **1/1 bootstrap and 49/49 nodes**, then continue in terminal 1's PowerShell:
 
 ```powershell
 $bootstrap = docker ps --filter 'label=com.docker.swarm.service.name=kadlab_kademlia-bootstrap' --format '{{.ID}}'
 if (@($bootstrap).Count -ne 1) { throw 'Expected one running bootstrap container' }
-function d {
-    docker exec -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell "$@" 2>>/tmp/cli-check/reader.log' demo @args
-    if ($LASTEXITCODE -ne 0) { docker exec $bootstrap tail -n 1 /tmp/cli-check/reader.log }
+docker exec $bootstrap mkdir -p /tmp/cli-check
+foreach ($name in @('release.txt','binary.bin','limit.bin','oversize.bin','owner.key','other.key')) {
+    docker cp "cli-check/$name" "${bootstrap}:/tmp/cli-check/$name"
+    if ($LASTEXITCODE -ne 0) { throw "Could not copy $name" }
 }
-$release = '/tmp/cli-check/release.txt'
-$download = '/tmp/cli-check/reader-download.txt'
-$binary = '/tmp/cli-check/binary.bin'
-$binaryCopy = '/tmp/cli-check/reader-binary-copy.bin'
-$pingAddress = 'kademlia-bootstrap:8000'
+docker exec $bootstrap chmod 600 /tmp/cli-check/owner.key /tmp/cli-check/other.key
+
+# Use only in PowerShell, between interactive writer sessions.
+function Update-Release([int]$version) {
+    Save-Recipe $version
+    docker cp cli-check/release.txt "${bootstrap}:/tmp/cli-check/release.txt"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not copy the updated recipe' }
+    docker exec $bootstrap cat /tmp/cli-check/release.txt
+}
+
+# Enter the interactive writer on UDP port 9000.
+docker exec -it -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/writer.log'
+```
+
+Private keys are temporary copies for demonstration clients. Servers use the public ownership configuration; private keys are excluded from images and Swarm configs.
+
+## 2. Enter terminal 2's reader: PowerShell
+
+```powershell
+$bootstrap = docker ps --filter 'label=com.docker.swarm.service.name=kadlab_kademlia-bootstrap' --format '{{.ID}}'
+if (@($bootstrap).Count -ne 1) { throw 'Expected one running bootstrap container' }
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 . ./cmd/tests/recipe-demo.ps1
-function Read-DemoFile([string]$path) { (docker exec $bootstrap cat $path) -join "`n" }
+
+# Separate reader node on port 9001; no signing key needed.
+docker exec -it -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell 2>>/tmp/cli-check/reader.log'
 ```
 
-The clients use different UDP ports (9000 and 9001) and independent node identities. Both join the servers on port 8000. Terminal 2 needs no signing key. Keep the stack running; do not redeploy between writing and reading. These commands run in PowerShell, not at `simnet>`.
+Both clients join the servers on port 8000. Different client ports prevent conflicts, even inside the same container. These are two additional nodes joining the 50-server network.
 
-## Which terminal runs each test
+## 3. Part 1: put in terminal 1, get in terminal 2
 
-Run the following sections in order, switching terminals at the indicated commands. Variables and functions belong to each PowerShell session; copy the full hash printed by terminal 1 into terminal 2 as `$key = 'HASH'` (and `$binaryKey = 'HASH'` for binary data).
+Terminal 1, at `simnet>`, one command per line:
 
-| Operation in the remaining sections | Terminal |
-|---|---|
-| `Update-Release`, `put`, `publish`, and wrong-owner publication attempts | 1: writer |
-| `get`, `install`, `show example.com:demo`, `show example.com:intruder`, and download checks | 2: reader |
-| `ping`, `show rt`, `show dns`, malformed input, and missing-value checks | Either terminal |
-| Interactive `show ds` demonstration | 1; it inspects that client's local store |
-| Targeted Go tests and final cleanup | 1, after both clients finish |
-
-For example, terminal 1 runs `d put $release`. Copy its printed hash into terminal 2, then run `d get $key $download` and `(Read-DemoFile $download) -ceq (Get-RecipeText 1)` there; expect `True`. Repeat with binary data. For the existing binary verification block, use the reader's container output:
-
-```powershell
-# Terminal 2: compare the uploaded and retrieved binary bytes. Expect equal hashes.
-docker exec $bootstrap sha256sum $binary $binaryCopy
+```text
+ping kademlia-bootstrap:8000
+show rt
+show nodes
+put /tmp/cli-check/release.txt
+show ds
 ```
 
-For Part 2, terminal 1 runs each `Update-Release N` and publication. After each publication succeeds, terminal 2 runs:
+Copy the full SHA-256 key printed by `put`. Terminal 2, at `simnet>`, replaces `RECIPE_KEY` below with that actual hash:
 
-```powershell
-# Replace 1 with the version just published; repeat for all versions 1 through 10.
-$version = 1
-d show example.com:demo
-d install "example.com:demo:$version" --output $download
-Read-DemoFile $download
-(Read-DemoFile $download) -ceq (Get-RecipeText $version)
-d install example.com:demo:latest --output $download
-(Read-DemoFile $download) -ceq (Get-RecipeText $version)
+```text
+get RECIPE_KEY
+get RECIPE_KEY /tmp/cli-check/reader-download.txt
+show rt
+show ds
 ```
 
-After all ten publications, run the historical install loop below in terminal 2. After each rejected rollback, fork, forced update, or wrong-owner attempt in terminal 1, check history and latest again in terminal 2: latest must remain 10 and the intruder package must remain absent. Terminal 2 can still retrieve after terminal 1's interactive client exits, because the servers retain the data. `show ds` only shows the current client's store; an empty reader store does not mean the network lost the value.
+Expect the full version 1 blueberry pie recipe and its source node. `show rt` lists this client's known peers. In UDP mode, `show nodes` currently prints only the local client. `show ds` shows local storage, which may be empty: default `k=10` stores on the nodes closest to the key. The reader retrieves through UDP despite the clients sharing a container filesystem.
 
-## Part 1
+Terminal 1, at `simnet>`:
 
-Run these in PowerShell after setting up both terminals, following the terminal assignment table above. Each download uses a fresh reader client, so it retrieves from the servers. Calculate hashes in terminal 1 and copy them into terminal 2 before `get`.
-
-```powershell
-# Ping a real UDP server. Expect pong and round-trip time.
-d ping $pingAddress
-
-# Check joining populated the routing table: peer addresses and shortened IDs.
-d show rt
-
-# Upload the file. Expect its full SHA-256 key.
-d put $release
-
-# Compute the expected key from the exact uploaded bytes.
-$key = (Get-FileHash cli-check/release.txt -Algorithm SHA256).Hash.ToLowerInvariant()
-
-# Print the value. Expect the full version 1 blueberry pie recipe and the source server.
-d get $key
-
-# Save the retrieved value. Expect destination filename and source server.
-d get $key $download
-
-# Check exact contents. Expect True.
-(Read-DemoFile $download) -ceq (Get-RecipeText 1)
-
-# Demonstrate show ds in the persistent session below; a fresh client starts empty.
-
-# Upload arbitrary binary bytes and calculate their expected key.
-d put $binary
-$binaryKey = (Get-FileHash cli-check/binary.bin -Algorithm SHA256).Hash.ToLowerInvariant()
-
-# Download the binary bytes to a file.
-d get $binaryKey $binaryCopy
-
-# Bad address: expect IP:PORT validation error.
-d ping bad-address
-
-# Unreachable peer: expect failure, not pong.
-d ping 127.0.0.1:7999
-
-# Missing file: expect file-not-found error.
-d put missing-file.txt
-
-# Malformed key: expect SHA-256 key validation error.
-d get bad-key
-
-# Well-formed but absent key: expect not found.
-d get ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+```text
+put /tmp/cli-check/binary.bin
+put /tmp/cli-check/limit.bin
+put /tmp/cli-check/oversize.bin
 ```
 
-Verify the binary download:
+Binary input and the 32,768-byte file must succeed; 32,769 bytes must report a size error. Copy the binary upload's hash into terminal 2:
 
-Run these in **PowerShell from `labs`**, after `get` reports that the file was saved. First copy the downloaded container file to the host. Then `Get-FileHash` reads each host file and calculates a SHA-256 fingerprint; `.Hash` selects that fingerprint, and `-eq` compares the two. The comparison does not modify either file. `True` verifies that all binary bytes match. `False` means different bytes only if both files exist and were read successfully; a missing-file error means the check did not complete. This tests that `put` and `get` preserve binary data without displaying it as text. Run each command once on its own line.
-
-```powershell
-# Copy the downloaded binary back to the host.
-docker cp "${bootstrap}:$binaryCopy" cli-check/reader-binary-copy.bin
-
-# Expect True: every byte survived the upload/download.
-(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/reader-binary-copy.bin).Hash
+```text
+get BINARY_KEY /tmp/cli-check/reader-binary-copy.bin
+exit
 ```
 
-Check the documented file-size limit from PowerShell:
+Terminal 2, back in PowerShell, verifies the bytes and re-enters the reader:
 
 ```powershell
-# Make a supported 32,768-byte file and an unsupported 32,769-byte file.
-[IO.File]::WriteAllBytes("$PWD/cli-check/limit.bin", [byte[]]::new(32768))
-[IO.File]::WriteAllBytes("$PWD/cli-check/oversize.bin", [byte[]]::new(32769))
+docker cp "${bootstrap}:/tmp/cli-check/reader-download.txt" cli-check/docker-download.txt
+docker cp "${bootstrap}:/tmp/cli-check/reader-binary-copy.bin" cli-check/docker-binary-copy.bin
+Get-Content cli-check/docker-download.txt
+(Get-FileHash cli-check/release.txt).Hash -eq (Get-FileHash cli-check/docker-download.txt).Hash
+(Get-FileHash cli-check/binary.bin).Hash -eq (Get-FileHash cli-check/docker-binary-copy.bin).Hash
+docker exec -it -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell 2>>/tmp/cli-check/reader.log'
 ```
 
-```powershell
-# Copy both boundary inputs into the container.
-docker cp cli-check/limit.bin "${bootstrap}:/tmp/cli-check/limit.bin"
-docker cp cli-check/oversize.bin "${bootstrap}:/tmp/cli-check/oversize.bin"
+Both comparisons must print `True` before updating the recipe. Missing-file errors mean verification could not complete.
 
-# Exactly 32,768 bytes: must succeed.
-d put /tmp/cli-check/limit.bin
+Either terminal, at `simnet>`, run individually:
 
-# One byte over the limit: must report a size error.
-d put /tmp/cli-check/oversize.bin
+```text
+ping bad-address
+ping 127.0.0.1:7999
+put missing-file.txt
+get bad-key
+get ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ```
 
-## Part 2: update one file through ten versions
+Expect malformed-address, unreachable-peer, missing-file, invalid-key, and not-found errors respectively. Do not type PowerShell variables, comments, or loops at the interactive prompt.
 
-Every valid publication should print replica acceptance and `published`.
+## 4. Part 2: publish ten versions and install from terminal 2
 
-Run updates and publications in terminal 1. After each succeeds, run the per-version reader checks above in terminal 2. From `d show example.com:demo` onward in this block, run commands in terminal 2, including the historical install loop.
+Terminal 1, at `simnet>`:
+
+```text
+show dns example.com
+show dns missing.example
+publish example.com:demo:1 /tmp/cli-check/release.txt
+```
+
+Expect the owner's public key, an unknown-owner error, and replica acceptance plus `published` for version 1. Terminal 2, at `simnet>`:
+
+```text
+show example.com:demo
+install example.com:demo:1 --output /tmp/cli-check/reader-v1.txt
+install example.com:demo:latest --output /tmp/cli-check/reader-latest.txt
+```
+
+For **each version 2 through 10**, keep terminal 2 open and follow these steps:
+
+1. Terminal 1: type `exit` to return to PowerShell.
+2. Run `Update-Release N`, replacing `N` with the next version number. This updates the same recipe file, prints its contents/hash, and copies it into Docker.
+3. Re-enter terminal 1's writer using the PowerShell command below.
+4. Run the appropriate publication from the table at `simnet>`.
+5. Terminal 2: install that version and latest using the reader commands below.
 
 ```powershell
-# Show the owner's public key from the configured DNS verifier.
-d show dns example.com
+docker exec -it -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/writer.log'
+```
 
-# Unknown owner: expect lookup failure.
-d show dns missing.example
+Restarting the writer client preserves history on the running servers. `Update-Release` belongs in PowerShell, never at `simnet>`.
 
-# Version 1 starts the chain with an automatic genesis predecessor.
-Update-Release 1
-d publish example.com:demo:1 $release
+| N | Recipe change | Terminal 1 command at `simnet>` |
+|---|---|---|
+| 2 | Reduce sugar to 120 g. | `publish example.com:demo:2 /tmp/cli-check/release.txt` |
+| 3 | Add 1 tablespoon lemon juice. | `publish --prev=2 example.com:demo:3 /tmp/cli-check/release.txt` |
+| 4 | Add 1 teaspoon lemon zest. | `publish example.com:demo:4 /tmp/cli-check/release.txt` |
+| 5 | Increase cornstarch to 3 tablespoons. | `publish example.com:demo:5 /tmp/cli-check/release.txt` |
+| 6 | Chill dough for 30 minutes. | `publish example.com:demo:6 /tmp/cli-check/release.txt` |
+| 7 | Increase oven temperature to 190 C. | `publish example.com:demo:7 /tmp/cli-check/release.txt` |
+| 8 | Increase baking time to 45 minutes. | `publish example.com:demo:8 /tmp/cli-check/release.txt` |
+| 9 | Add an egg glaze. | `publish example.com:demo:9 /tmp/cli-check/release.txt` |
+| 10 | Cool for 2 hours. | `publish --prev=9 example.com:demo:10 /tmp/cli-check/release.txt` |
 
-# Version 2 automatically extends version 1.
-Update-Release 2
-d publish example.com:demo:2 $release
+After each publication, terminal 2 runs these at `simnet>`. Replace `N` in the version and filename with the actual number:
 
-# Version 3 explicitly names version 2 as predecessor.
-Update-Release 3
-d publish --prev=2 example.com:demo:3 $release
+```text
+show example.com:demo
+install example.com:demo:N --output /tmp/cli-check/reader-vN.txt
+install example.com:demo:latest --output /tmp/cli-check/reader-latest.txt
+```
 
-# Version 4 extends version 3.
-Update-Release 4
-d publish example.com:demo:4 $release
+After version 10, expect history `10 -> 9 -> ... -> 1 -> genesis`. Retrieve every historical version in terminal 2, at `simnet>`:
 
-# Version 5 extends version 4.
-Update-Release 5
-d publish example.com:demo:5 $release
+```text
+install example.com:demo:1 --output /tmp/cli-check/reader-v1.txt
+install example.com:demo:2 --output /tmp/cli-check/reader-v2.txt
+install example.com:demo:3 --output /tmp/cli-check/reader-v3.txt
+install example.com:demo:4 --output /tmp/cli-check/reader-v4.txt
+install example.com:demo:5 --output /tmp/cli-check/reader-v5.txt
+install example.com:demo:6 --output /tmp/cli-check/reader-v6.txt
+install example.com:demo:7 --output /tmp/cli-check/reader-v7.txt
+install example.com:demo:8 --output /tmp/cli-check/reader-v8.txt
+install example.com:demo:9 --output /tmp/cli-check/reader-v9.txt
+install example.com:demo:10 --output /tmp/cli-check/reader-v10.txt
+install example.com:demo:1
+exit
+```
 
-# Version 6 extends version 5.
-Update-Release 6
-d publish example.com:demo:6 $release
+Terminal 2, back in PowerShell:
 
-# Version 7 extends version 6.
-Update-Release 7
-d publish example.com:demo:7 $release
-
-# Version 8 extends version 7.
-Update-Release 8
-d publish example.com:demo:8 $release
-
-# Version 9 extends version 8.
-Update-Release 9
-d publish example.com:demo:9 $release
-
-# Version 10 explicitly extends version 9.
-Update-Release 10
-d publish --prev=9 example.com:demo:10 $release
-
-# Expect ten verified records: 10 -> 9 -> ... -> 1 -> genesis.
-d show example.com:demo
-
-# Install latest. Expect installed version 10.
-d install example.com:demo:latest --output $download
-
-# Print the downloaded version 10 recipe so its changes are visible.
-Read-DemoFile $download
-
-# Latest must contain version 10's bytes. Expect True.
-(Read-DemoFile $download) -ceq (Get-RecipeText 10)
-
-# Test EVERY historical version, not just latest.
-# Expect version=N matches=True for each N from 1 through 10.
+```powershell
 foreach ($version in 1..10) {
-    d install "example.com:demo:$version" --output $download
-    # Display this historical recipe before checking it.
-    Read-DemoFile $download
-    $matches = (Read-DemoFile $download) -ceq (Get-RecipeText $version)
+    docker cp "${bootstrap}:/tmp/cli-check/reader-v$version.txt" "cli-check/docker-v$version.txt"
+    if ($LASTEXITCODE -ne 0) { throw "Missing download for version $version" }
+    $actual = [IO.File]::ReadAllText("$PWD/cli-check/docker-v$version.txt")
+    $matches = $actual -ceq (Get-RecipeText $version)
+    Write-Output $actual
     "version=$version matches=$matches"
-    if (-not $matches) { throw "Incorrect bytes for version $version" }
+    if (-not $matches) { throw "Incorrect recipe for version $version" }
 }
-
-# Test install's default filename. Expect demo-1.pkg containing the version 1 recipe.
-d install example.com:demo:1
+docker exec $bootstrap cat /app/demo-1.pkg
+docker exec -it -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell 2>>/tmp/cli-check/reader.log'
 ```
 
-Check `docker exec $bootstrap cat /app/demo-1.pkg`: it must print the full version 1 blueberry pie recipe.
+Expect `matches=True` for all ten versions and the original version 1 recipe in `demo-1.pkg`.
 
-## Part 2: invalid updates and --force
+## 5. Invalid updates: writer attempts, reader checks
 
-Latest must remain **10**. Force skips sender preflight; receivers still validate. Failed attempts may leave immutable blobs/records, but must not change accepted history.
+Terminal 1, at `simnet>`, run each separately:
 
-Run publication attempts in terminal 1. Run installs, history checks, and content comparisons in terminal 2 to verify the network still serves version 10.
-
-```powershell
-# Rollback without force: sender must reject before upload.
-d publish example.com:demo:5 $release
-
-# Duplicate version without force: sender must reject.
-d publish example.com:demo:10 $release
-
-# Fork without force: sender must reject the old predecessor.
-d publish --prev=3 example.com:demo:11 $release
-
-# Forced rollback: receiving replicas must reject.
-d publish --force example.com:demo:5 $release
-
-# Forced fork from version 3: receiving replicas must reject.
-d publish --force --prev=3 example.com:demo:11 $release
-
-# Forced competing genesis: receiving replicas must reject.
-d publish --force --prev=0 example.com:demo:11 $release
-
-# Forced missing ancestry: receiving replicas must reject.
-d publish --force --prev=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff example.com:demo:11 $release
-
-# Force must not carry into later commands: expect sender rejection again.
-d publish --prev=3 example.com:demo:11 $release
-
-# Invalid version: expect positive-integer error.
-d publish example.com:demo:0 $release
-
-# Unknown predecessor: expect predecessor-not-found error.
-d publish --prev=99 example.com:demo:11 $release
-
-# Missing historical version: expect not found.
-d install example.com:demo:99
-
-# Missing package: expect package/pointer not found.
-d install example.com:missing:latest
-
-# Check accepted history is still exactly ten versions.
-d show example.com:demo
-
-# Check latest remains version 10 with unchanged bytes. Expect True.
-d install example.com:demo:latest --output $download
-(Read-DemoFile $download) -ceq (Get-RecipeText 10)
-```
-
-### Wrong owner
-
-Run both wrong-owner publication attempts in terminal 1; run the final intruder lookup in terminal 2.
-
-```powershell
-# Supply the other signer for the attack test.
-docker cp cli-check/other.key "${bootstrap}:/tmp/cli-check/other.key"
-
-# Without force: sender must reject ownership.
-docker exec $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/other.key "$@" 2>>/tmp/cli-check/client.log' demo publish example.com:intruder:1 $release
-docker exec $bootstrap tail -n 1 /tmp/cli-check/client.log
-
-# With force: receivers must reject ownership/signature.
-docker exec $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/other.key "$@" 2>>/tmp/cli-check/client.log' demo publish --force example.com:intruder:1 $release
-docker exec $bootstrap tail -n 1 /tmp/cli-check/client.log
-
-# No accepted intruder package should exist.
-d show example.com:intruder
-```
-
-## Decoded store and exit
-
-Open a persistent client with `k=51`: 50 servers plus this client. Run `put` and `show ds` in this same session so the local store visibly contains the file. Ensure all 50 servers are healthy. The earlier commands use the default k.
-
-
-```powershell
-# Open the interactive UDP client with terminal input attached.
-docker exec -it $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --k 51 --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/client.log'
-```
-
-At `simnet>`, run each command separately:
-
-| Command | Expected result |
+| Command | Expected rejection |
 |---|---|
-| `put /tmp/cli-check/release.txt` | Attempts storage across all 51 reachable nodes, including this client. Prints the full key. |
-| `show ds` | Must show that key shortened and the actual byte count for the current version 10 recipe file. |
-| `publish example.com:visible:1 /tmp/cli-check/release.txt` | Creates a separate demonstration package with locally stored metadata. Use a fresh name on repeat runs. |
-| `show ds` | Must show the blob, a decoded `version-record example.com:visible version=1`, and a `latest-pointer example.com:visible version=1`. |
-| `show example.com:demo` | Retrieves/verifies the ten-version history. |
-| `show rt` | Displays populated routing buckets. |
-| `exit` | Ends the client and returns to PowerShell. |
+| `publish example.com:demo:5 /tmp/cli-check/release.txt` | Rollback at sender. |
+| `publish example.com:demo:10 /tmp/cli-check/release.txt` | Duplicate version. |
+| `publish --prev=3 example.com:demo:11 /tmp/cli-check/release.txt` | Fork at sender. |
+| `publish --force example.com:demo:5 /tmp/cli-check/release.txt` | Forced rollback at receivers. |
+| `publish --force --prev=3 example.com:demo:11 /tmp/cli-check/release.txt` | Forced fork at receivers. |
+| `publish --force --prev=0 example.com:demo:11 /tmp/cli-check/release.txt` | Competing genesis at receivers. |
+| `publish --force --prev=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff example.com:demo:11 /tmp/cli-check/release.txt` | Missing ancestry at receivers. |
+| `publish --prev=3 example.com:demo:11 /tmp/cli-check/release.txt` | Sender rejects again; force does not persist. |
+| `publish example.com:demo:0 /tmp/cli-check/release.txt` | Invalid version. |
+| `publish --prev=99 example.com:demo:11 /tmp/cli-check/release.txt` | Unknown predecessor. |
 
-In terminal 2's PowerShell, `d install example.com:demo:latest --output $download` must still install version 10 from the servers after terminal 1's interactive client exits.
+Force skips sender preflight; receivers still validate. Failed attempts may leave immutable blobs/records but must not change accepted history. After **each attempt**, terminal 2, at `simnet>`:
 
-## Conditions the CLI cannot directly create
+```text
+show example.com:demo
+install example.com:demo:latest --output /tmp/cli-check/reader-latest.txt
+```
 
-These targeted tests cover malicious data and missed updates; no replication tests are included.
+History must still contain ten versions, with latest 10. Also test these in terminal 2:
+
+```text
+install example.com:demo:99
+install example.com:missing:latest
+exit
+```
+
+Expect not found for both missing entries. Terminal 2's PowerShell checks latest and re-enters:
 
 ```powershell
-# Reject wrong-hash stores and corrupted downloaded values.
+docker cp "${bootstrap}:/tmp/cli-check/reader-latest.txt" cli-check/docker-latest.txt
+[IO.File]::ReadAllText("$PWD/cli-check/docker-latest.txt") -ceq (Get-RecipeText 10)
+docker exec -it -e CLI_PORT=9001 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell 2>>/tmp/cli-check/reader.log'
+```
+
+Expect `True`.
+
+## 6. Wrong owner on the same network
+
+Terminal 1 types `exit`, then uses the other signer in PowerShell:
+
+```powershell
+docker exec -it -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --publisher-key /tmp/cli-check/other.key 2>>/tmp/cli-check/writer.log'
+```
+
+Terminal 1, at `simnet>`:
+
+```text
+publish example.com:intruder:1 /tmp/cli-check/release.txt
+publish --force example.com:intruder:1 /tmp/cli-check/release.txt
+exit
+```
+
+Expect sender rejection without force and receiver signature/ownership rejection with force. Terminal 2, at `simnet>`:
+
+```text
+show example.com:intruder
+show example.com:demo
+install example.com:demo:latest --output /tmp/cli-check/reader-latest.txt
+```
+
+No accepted intruder package should exist; demo latest remains 10, even after writer exit. Keep the reader open.
+
+## 7. Decoded local store and exit
+
+Terminal 1's PowerShell starts the owner client with `k=52` to allow storage across 50 servers and both clients. This setting is for demonstrating local storage; earlier tests use default `k=10`. Keep the reader running and all servers healthy.
+
+```powershell
+docker exec -it -e CLI_PORT=9000 $bootstrap sh -c 'exec /usr/local/bin/kadlab-shell --k 52 --publisher-key /tmp/cli-check/owner.key 2>>/tmp/cli-check/writer.log'
+```
+
+Terminal 1, at `simnet>`:
+
+```text
+put /tmp/cli-check/release.txt
+show ds
+publish example.com:visible:1 /tmp/cli-check/release.txt
+show ds
+show rt
+exit
+```
+
+Use a fresh name instead of `visible` on repeat runs. Expect the blob and decoded `version-record` and `latest-pointer` entries for visible version 1. `show ds` and `show rt` inspect this client only.
+
+Terminal 2, still at `simnet>`, retrieves after writer exit:
+
+```text
+show example.com:visible
+install example.com:visible:latest --output /tmp/cli-check/reader-visible.txt
+install example.com:demo:latest --output /tmp/cli-check/reader-latest.txt
+exit
+```
+
+## 8. Status, logs, and targeted checks: PowerShell only
+
+```powershell
+docker stack services kadlab
+docker ps --filter 'label=com.docker.stack.namespace=kadlab' --format 'table {{.Names}}\t{{.Status}}'
+docker service logs --tail 50 kadlab_kademlia-nodes
+docker exec $bootstrap tail -n 20 /tmp/cli-check/writer.log
+docker exec $bootstrap tail -n 20 /tmp/cli-check/reader.log
+
 go test ./kademlia -run 'TestStoreLocalAndHandleStoreRPC|TestLookupDataRejectsCorruptedRemoteValue' -count=1 -v
-
-# Catch up after missing several publications.
 go test ./cmd/simshell -run '^TestCLIInstallCatchesUpSeveralMissedPublications$' -count=1 -v
-
-# Reject cyclic history; genuine self-hashing cycles cannot practically be made by publish.
 go test ./metadata ./registry -run 'TestHistoryCycle' -count=1 -v
 ```
 
-Require PASS. This demonstration guide does not replace the complete engineering suite or report.
+These tests cover wrong-hash stores, corrupted values, missed-update catch-up, and cyclic history that normal CLI commands cannot directly create. Require PASS; this guide does not replace the full engineering suite.
 
-## Finish
+## 9. Finish after both clients exit: terminal 1, PowerShell
 
 ```powershell
-# Remove the temporary signing-key copies introduced by this guide.
 docker exec $bootstrap rm -f /tmp/cli-check/owner.key /tmp/cli-check/other.key
-
-# Stop/remove the demonstration stack; its in-memory values are lost.
 .\docker-lab.ps1 -Action Stop
 ```
+
+Stop removes the stack and loses its in-memory values. Host keys and public ownership configuration remain available.
